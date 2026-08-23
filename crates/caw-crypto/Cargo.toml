@@ -1,0 +1,17 @@
+[package]
+name = "caw-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-80211.workspace = true
+zeroize.workspace = true
+aes.workspace = true
+aes-kw.workspace = true
+cmac.workspace = true
+hmac.workspace = true
+pbkdf2.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+p256.workspace = true

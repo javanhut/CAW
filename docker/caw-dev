@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run a command inside the caw dev container.
+#
+#   docker/caw-dev              # interactive shell
+#   docker/caw-dev cargo build  # one-shot command
+#
+# --privileged and the /lib/modules mount are required so the container can
+# load cfg80211 and open AF_NETLINK sockets against the host kernel.
+set -euo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+image=caw-dev
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "building $image ..." >&2
+    docker build -t "$image" "$repo/docker"
+fi
+
+exec docker run --rm -it \
+    --privileged \
+    --net=host \
+    -v "$repo:/work" \
+    -v /lib/modules:/lib/modules:ro \
+    "$image" \
+    "${@:-bash}"

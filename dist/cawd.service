@@ -1,0 +1,45 @@
+[Unit]
+Description=caw wireless daemon
+Wants=network.target
+Before=network.target
+After=sysinit.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cawd
+Restart=on-failure
+RestartSec=2
+
+# /run/caw holds the CLI socket; /var/lib/caw holds network profiles, which
+# contain passphrases and so stay root-only.
+RuntimeDirectory=caw
+RuntimeDirectoryMode=0755
+StateDirectory=caw
+StateDirectoryMode=0700
+UMask=0077
+
+# CAP_NET_ADMIN for netlink and key installation, CAP_NET_RAW for the EAPOL
+# packet socket. Nothing else is needed.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET AF_INET AF_INET6
+
+# Soft-blocked radios are a common cause of "wifi does not work"; leave the
+# rfkill node reachable so caw can report and clear it.
+DeviceAllow=/dev/rfkill rw
+
+[Install]
+WantedBy=multi-user.target

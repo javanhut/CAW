@@ -1,0 +1,14 @@
+[package]
+name = "caw-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-80211.workspace = true
+caw-crypto.workspace = true
+caw-dhcp.workspace = true
+caw-eapol.workspace = true
+caw-nl80211.workspace = true
+caw-rtnl.workspace = true
+zeroize.workspace = true

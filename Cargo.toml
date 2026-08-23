@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Every crate in this workspace is `#![forbid(unsafe_code)]`. Dependencies are
+# chosen to keep C out of the tree: rustix on its linux_raw backend issues
+# syscalls directly instead of going through libc, and all crypto is RustCrypto.
+[workspace.dependencies]
+caw-80211    = { path = "crates/caw-80211" }
+caw-core     = { path = "crates/caw-core" }
+caw-crypto   = { path = "crates/caw-crypto" }
+caw-dhcp     = { path = "crates/caw-dhcp" }
+caw-eapol    = { path = "crates/caw-eapol" }
+caw-ipc      = { path = "crates/caw-ipc" }
+caw-netlink  = { path = "crates/caw-netlink" }
+caw-nl80211  = { path = "crates/caw-nl80211" }
+caw-rtnl     = { path = "crates/caw-rtnl" }
+
+clap    = { version = "4.6.6", features = ["derive"] }
+rustix  = { version = "1.1.4", default-features = false, features = ["std", "net", "event", "time", "process"] }
+serde   = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1.9", features = ["derive"] }
+
+# WPA primitives.
+aes     = "0.9"
+aes-kw  = "0.3"
+cmac    = "0.8"
+hmac    = "0.13"
+pbkdf2  = { version = "0.13", default-features = false, features = ["hmac"] }
+sha1    = "0.11"
+sha2    = "0.11"
+p256    = "0.14"

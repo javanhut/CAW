@@ -1,0 +1,25 @@
+# Build output. target-container/ is the dev container's CARGO_TARGET_DIR,
+# kept separate because its artifacts are a different arch and libc.
+/target/
+/target-container/
+
+# makepkg builds in place and creates these next to the PKGBUILD.
+/pkg/
+/src/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.src.tar.gz
+*.log
+
+# Installed tree produced by `make DESTDIR=... install` when testing locally.
+/destdir/
+
+# Editor and OS noise.
+.DS_Store
+*.swp
+*~
+/.idea/
+/.vscode/
+
+# Cargo.lock is intentionally NOT ignored: caw ships binaries, so the lock
+# file is part of the source and `make` builds with --locked against it.

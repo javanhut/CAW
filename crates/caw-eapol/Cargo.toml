@@ -1,0 +1,11 @@
+[package]
+name = "caw-eapol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-crypto.workspace = true
+caw-80211.workspace = true
+rustix.workspace = true
+zeroize.workspace = true

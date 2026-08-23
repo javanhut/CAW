@@ -1,0 +1,9 @@
+[package]
+name = "caw-nl80211"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-netlink.workspace = true
+caw-80211.workspace = true

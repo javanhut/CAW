@@ -1,0 +1,8 @@
+[package]
+name = "caw-rtnl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-netlink.workspace = true

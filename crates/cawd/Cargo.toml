@@ -1,0 +1,16 @@
+[package]
+name = "cawd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+caw-core.workspace = true
+caw-dhcp.workspace = true
+caw-eapol.workspace = true
+caw-ipc.workspace = true
+caw-netlink.workspace = true
+caw-nl80211.workspace = true
+caw-rtnl.workspace = true
+rustix.workspace = true
+serde_json.workspace = true

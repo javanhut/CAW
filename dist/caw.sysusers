@@ -1,0 +1,4 @@
+# Members of this group may issue state-changing commands to cawd. Read-only
+# commands (scan, status) are open to everyone; the daemon checks the peer's
+# credentials on the socket rather than relying on file mode alone.
+g caw -
