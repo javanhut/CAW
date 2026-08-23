@@ -111,6 +111,8 @@ name = "caw"
 version = "0.1.0"
 dependencies = [
  "caw-ipc",
+ "caw-netlink",
+ "caw-rtnl",
  "clap",
  "serde_json",
 ]

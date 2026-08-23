@@ -34,9 +34,16 @@ pub enum Credential {
 }
 
 pub enum EnterpriseMethod {
-    Peap { password: String },
-    Ttls { password: String },
-    Tls { client_cert: std::path::PathBuf, key: std::path::PathBuf },
+    Peap {
+        password: String,
+    },
+    Ttls {
+        password: String,
+    },
+    Tls {
+        client_cert: std::path::PathBuf,
+        key: std::path::PathBuf,
+    },
 }
 
 /// Where a connection is. Drives what `caw status` prints.
@@ -72,16 +79,25 @@ pub enum Command {
 
 /// What the daemon should do. Never performed here.
 pub enum Action {
-    TriggerScan { ifindex: u32 },
-    Associate { bssid: [u8; 6] },
+    TriggerScan {
+        ifindex: u32,
+    },
+    Associate {
+        bssid: [u8; 6],
+    },
     SendEapol(Vec<u8>),
     SendMgmtFrame(Vec<u8>),
     InstallKeys(caw_eapol::Keys),
     StartDhcp,
     ApplyLease(caw_dhcp::Lease),
-    SetTimer { id: TimerId, millis: u64 },
+    SetTimer {
+        id: TimerId,
+        millis: u64,
+    },
     /// Ask the user, via whichever CLI is attached.
-    RequestSecret { prompt: String },
+    RequestSecret {
+        prompt: String,
+    },
     Notify(State),
 }
 

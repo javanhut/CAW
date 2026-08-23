@@ -32,11 +32,20 @@ pub struct Bss {
 
 /// Events the kernel pushes on the multicast groups we subscribe to.
 pub enum Event {
-    ScanComplete { wiphy: u32 },
-    Connected { bssid: [u8; 6] },
-    Disconnected { reason: u16 },
+    ScanComplete {
+        wiphy: u32,
+    },
+    Connected {
+        bssid: [u8; 6],
+    },
+    Disconnected {
+        reason: u16,
+    },
     /// SAE: the kernel wants userspace to run external authentication.
-    ExternalAuth { bssid: [u8; 6], ssid: Vec<u8> },
+    ExternalAuth {
+        bssid: [u8; 6],
+        ssid: Vec<u8>,
+    },
     /// A management frame we registered interest in (SAE commit/confirm).
     Frame(Vec<u8>),
 }

@@ -13,15 +13,30 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     ListPorts,
-    PortInfo { name: String },
-    PortUp { name: String, up: bool },
-    Scan { port: Option<String> },
-    Connect { ssid: String, port: Option<String> },
-    Disconnect { ssid: String },
+    PortInfo {
+        name: String,
+    },
+    PortUp {
+        name: String,
+        up: bool,
+    },
+    Scan {
+        port: Option<String>,
+    },
+    Connect {
+        ssid: String,
+        port: Option<String>,
+    },
+    Disconnect {
+        ssid: String,
+    },
     Status,
     /// Supply a secret the daemon asked for, keeping passphrases off argv
     /// where they would be visible in `ps`.
-    Secret { token: u64, value: String },
+    Secret {
+        token: u64,
+        value: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -38,13 +53,21 @@ pub enum Response {
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     Scanning,
-    Associating { bssid: String },
+    Associating {
+        bssid: String,
+    },
     Authenticating,
     Configuring,
     Connected,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
     /// The daemon needs a credential; answer with [`Request::Secret`].
-    NeedSecret { token: u64, prompt: String, kind: SecretKind },
+    NeedSecret {
+        token: u64,
+        prompt: String,
+        kind: SecretKind,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
