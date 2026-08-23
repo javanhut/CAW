@@ -106,6 +106,34 @@ pub fn status() -> Result<()> {
     }
 }
 
+/// `caw shutdown`.
+///
+/// The graceful way down. `cawd` has no SIGTERM handler — there is no safe
+/// path from a signal to a pollable descriptor without libc, and every crate
+/// here is `#![forbid(unsafe_code)]` — so killing it leaves the station on the
+/// air without deauthenticating, and the access point holds the slot until it
+/// times out. This asks over the socket instead, and the daemon disconnects
+/// before it exits.
+///
+/// The daemon answers `Ok` and *then* stops, so the reply is already in the
+/// socket buffer by the time it goes; a closed connection after that is the
+/// daemon having done what was asked, not a failure.
+pub fn shutdown() -> Result<()> {
+    let mut client = Client::connect()?;
+    match client.request(&Request::Shutdown, report) {
+        Ok(Response::Ok) => {
+            eprintln!("cawd stopped");
+            Ok(())
+        }
+        Ok(_) => Err(crate::ipc::Error::Unexpected.into()),
+        Err(crate::ipc::Error::Closed) => {
+            eprintln!("cawd stopped");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// `caw port set <name> dhcp`.
 ///
 /// This one goes through the daemon even though its sibling `port up` does

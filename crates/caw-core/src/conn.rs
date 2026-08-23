@@ -106,6 +106,12 @@ pub enum Command {
     Connect {
         ssid: Vec<u8>,
     },
+    /// Join the strongest network this machine has an autoconnecting profile
+    /// for, choosing which one from the scan rather than being told.
+    ///
+    /// Ignored unless the connection is idle: a link already up, or an attempt
+    /// already under way, is the outcome this asks for.
+    Autoconnect,
     /// The credential [`Action::RequestSecret`] asked for.
     Secret {
         value: Secret,
@@ -235,6 +241,9 @@ pub struct GroupKey {
 pub enum Failure {
     /// Nothing advertising that SSID was in the scan results.
     NotFound,
+    /// An autoconnect found nothing it knows: every BSS in range either has no
+    /// profile or has one with `autoconnect` turned off.
+    NoKnownNetwork,
     /// The network is offering less than the profile recorded. This is the
     /// downgrade defence: an attacker cannot present an open network under a
     /// known name and collect whatever the machine sends next.
@@ -319,6 +328,7 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Failure::NotFound => write!(f, "no access point is advertising that network"),
+            Failure::NoKnownNetwork => write!(f, "no saved network is in range"),
             Failure::Downgrade { recorded, offered } => write!(
                 f,
                 "refusing to join at {offered}: this network was saved as {recorded}"
@@ -506,6 +516,19 @@ impl Connection {
                 self.start_scan(out);
             }
 
+            // No target: which network to join is a question for the scan
+            // results, and `select` answers it with `policy::best_known`.
+            Command::Autoconnect => {
+                if self.state != State::Idle {
+                    return;
+                }
+                self.target = None;
+                self.session = None;
+                self.pending = None;
+                self.attempts = 0;
+                self.start_scan(out);
+            }
+
             Command::Secret { value } => {
                 let Some(target) = self.target.as_mut() else {
                     return;
@@ -546,14 +569,42 @@ impl Connection {
     }
 
     /// Pick a BSS out of a scan and start working towards it.
+    ///
+    /// A target already set means `caw connect` named the network and only the
+    /// BSS is open; no target means this scan came from
+    /// [`Command::Autoconnect`], where policy chooses the network too. The
+    /// chosen BSSID is carried out of the borrow rather than the BSS itself,
+    /// so the profile lookup and the assignment below do not overlap.
     fn select(&mut self, scan: Vec<Bss>, out: &mut Vec<Action>) {
-        let Some(target) = self.target.as_ref() else {
-            return;
+        let (bssid, discovered) = match self.target.as_ref() {
+            Some(target) => match policy::best_bss(&scan, &target.ssid) {
+                Some(bss) => (bss.bssid, None),
+                None => {
+                    self.fail(Failure::NotFound, out);
+                    return;
+                }
+            },
+            None => match policy::best_known(&scan, &self.profiles) {
+                Some((bss, profile)) => (bss.bssid, Some(profile.ssid.clone())),
+                None => {
+                    self.fail(Failure::NoKnownNetwork, out);
+                    return;
+                }
+            },
         };
-        let Some(bssid) = policy::best_bss(&scan, &target.ssid).map(|bss| bss.bssid) else {
-            self.fail(Failure::NotFound, out);
-            return;
-        };
+
+        if let Some(ssid) = discovered {
+            self.target = Some(Target {
+                ssid,
+                secret: None,
+                // `best_known` only returns profiles with autoconnect set, so
+                // this network is one to hold on to across a drop — the same
+                // rule `Command::Connect` applies.
+                retry: true,
+                save: false,
+            });
+        }
+
         let bss = scan
             .into_iter()
             .find(|bss| bss.bssid == bssid)

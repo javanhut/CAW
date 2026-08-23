@@ -277,6 +277,35 @@ the life of the connection, answering group rekeys. Roaming re-enters
 `Authenticating` for the new BSS without tearing down the IP configuration
 where the network allows it.
 
+### Autoconnect
+
+`Idle` has a second way out. `Command::Autoconnect` enters `Scanning` with no
+target at all: which network to join is a question for the scan results, and
+`policy::best_known` answers it with the strongest BSS the machine has a saved
+profile for. Everything downstream of that choice is the ordinary lifecycle —
+same downgrade check, same AKM negotiation, same handshake.
+
+The split is the usual one. `caw-core` decides *which* network qualifies; the
+daemon decides *when* to ask, on a timer that backs off from ten seconds to
+five minutes while nothing known is in range, and idles at a minute once
+something is joined. The daemon's loop stops there: `caw-core` does its own
+reconnecting with its own backoff once a network has actually been joined, so
+the two never both retry the same link.
+
+Two restrictions are worth stating, because they are what makes joining a
+network with nobody watching safe:
+
+- **A credential or nothing.** There is no client attached to answer
+  `Action::RequestSecret`, so only a profile that already holds a credential
+  can be joined unattended. `Profile::new` sets `autoconnect` for exactly those
+  and leaves it off for `Credential::None` — an open network authenticates
+  nothing, so a saved one is a name any AP in range can also broadcast, and the
+  downgrade floor has nothing to bite on when the recorded level is already
+  Open. A PSK or SAE network cannot be impersonated that way: the 4-way
+  handshake is mutual, and an AP without the passphrase fails it.
+- **Off is reachable.** `cawd --no-autoconnect` turns the loop off for the
+  machine; clearing `autoconnect` in a profile turns it off for one network.
+
 ---
 
 ## 7. IPC
@@ -305,6 +334,32 @@ cawd
 
 Secrets travel over the socket in a `Secret` message rather than on argv, where
 `ps` would expose them to every user on the machine.
+
+`Request::Shutdown` is on the same socket, and is how the daemon is stopped:
+
+```
+caw shutdown
+   │  "Shutdown"
+   ▼
+cawd                              disconnect, then unlink the socket
+   │
+   ▼
+  Ok
+```
+
+It is a state change, so it needs root or the `caw` group like any other. The
+`Ok` is written before the teardown begins, so it is already in the socket
+buffer when the daemon goes; a closed connection after that is success, not a
+failure, and the CLI treats it as such.
+
+This exists because `cawd` cannot catch SIGTERM. rustix 1.1.4 has no
+`signalfd` — it is listed in `rustix::not_implemented::yet` — and the signal
+calls it does have are `unsafe fn` behind its `runtime` feature, so there is no
+safe path from a signal to a pollable descriptor without libc. The unit file
+uses `caw shutdown` as its `ExecStop=`. On a plain `kill` nothing is left
+behind, because `RuntimeDirectory=` removes `/run/caw` and the kernel closes
+the descriptors, but the station leaves the air without deauthenticating and
+the AP holds the slot until its inactivity timeout.
 
 ---
 
@@ -403,3 +458,7 @@ state machines do not change, only who calls `poll`.
   wired NIC. nl80211 supersedes this at step 2.
 - There are no man pages or shell completions yet. Both are generatable from
   the clap definitions once the CLI settles.
+- `cawd` cannot catch SIGTERM, for the reason given in §7, so a clean stop goes
+  through `caw shutdown` (or `systemctl stop cawd`, which runs it). A `kill`
+  leaves nothing behind on disk but does not deauthenticate. Closing that gap
+  needs one `signalfd` in rustix and one arm in the reactor's dispatch.

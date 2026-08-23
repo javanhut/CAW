@@ -27,13 +27,15 @@
 //! are `unsafe fn` behind its `runtime` feature. There is no safe path from a
 //! signal to a pollable descriptor without libc.
 //!
-//! So `cawd` is stopped through the socket, with [`caw_ipc::Request::Shutdown`]
-//! from root or the `caw` group, which runs the same teardown a SIGTERM
-//! handler would: disconnect, then remove the socket. On a plain SIGTERM the
-//! kernel closes the descriptors and systemd's `RuntimeDirectory=` removes
-//! `/run/caw`, so nothing is left behind — but the station leaves the air
-//! without deauthenticating. Closing the gap needs one `signalfd` in rustix,
-//! and one arm in [`reactor`].
+//! So `cawd` is stopped through the socket: `caw shutdown`, which sends
+//! [`caw_ipc::Request::Shutdown`] from root or the `caw` group and runs the
+//! teardown a SIGTERM handler would — disconnect, then remove the socket. The
+//! systemd unit uses it as `ExecStop=`, so `systemctl stop cawd` takes the
+//! clean path too. On a plain SIGTERM the kernel closes the descriptors and
+//! `RuntimeDirectory=` removes `/run/caw`, so nothing is left behind — but the
+//! station leaves the air without deauthenticating and the AP holds it until
+//! the inactivity timeout. Closing that last gap needs one `signalfd` in
+//! rustix, and one arm in [`reactor`].
 #![forbid(unsafe_code)]
 
 mod auth;
@@ -60,25 +62,38 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Error> {
-    let Some(socket) = parse_args()? else {
+    let Some(options) = parse_args()? else {
         return Ok(());
     };
-    Reactor::new(&socket)?.run()
+    Reactor::new(&options.socket, options.autoconnect)?.run()
 }
 
 const USAGE: &str = "\
-usage: cawd [--socket PATH]
+usage: cawd [--socket PATH] [--no-autoconnect]
 
-  --socket PATH  listen here instead of /run/caw/caw.sock
-  -h, --help     show this
+  --socket PATH     listen here instead of /run/caw/caw.sock
+  --no-autoconnect  never join a saved network unless asked to
+  -h, --help        show this
 ";
+
+/// How the daemon was asked to run.
+struct Options {
+    socket: PathBuf,
+    autoconnect: bool,
+}
 
 /// `None` when the arguments asked for something already done, such as help.
 ///
-/// Hand-parsed rather than through clap: two options do not justify a
+/// Hand-parsed rather than through clap: a handful of options do not justify a
 /// dependency in a program whose interface is a socket.
-fn parse_args() -> Result<Option<PathBuf>, Error> {
-    let mut socket = PathBuf::from(caw_ipc::SOCKET_PATH);
+fn parse_args() -> Result<Option<Options>, Error> {
+    // Autoconnect defaults on. A daemon enabled at boot that leaves the radio
+    // idle is a machine you have to be sitting in front of to put on the
+    // network, which is the opposite of what enabling it was for.
+    let mut options = Options {
+        socket: PathBuf::from(caw_ipc::SOCKET_PATH),
+        autoconnect: true,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -87,15 +102,16 @@ fn parse_args() -> Result<Option<PathBuf>, Error> {
                 return Ok(None);
             }
             "--socket" => {
-                socket = args
+                options.socket = args
                     .next()
                     .ok_or_else(|| Error::Usage("--socket needs a path".to_owned()))?
                     .into();
             }
+            "--no-autoconnect" => options.autoconnect = false,
             other => return Err(Error::Usage(format!("unknown argument {other}"))),
         }
     }
-    Ok(Some(socket))
+    Ok(Some(options))
 }
 
 #[derive(Debug)]

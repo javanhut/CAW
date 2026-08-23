@@ -44,6 +44,11 @@ pub enum Command {
     },
     /// Show the current wireless connection.
     Status,
+    /// Stop the caw daemon, leaving any joined network cleanly first.
+    ///
+    /// The daemon deauthenticates before it exits, so the access point frees
+    /// the station straight away instead of holding it until a timeout.
+    Shutdown,
 }
 
 #[derive(Subcommand)]
@@ -141,6 +146,17 @@ mod tests {
             _ => panic!("expected disconnect"),
         }
         assert!(matches!(parse(&["caw", "status"]).command, Command::Status));
+    }
+
+    /// Stopping the daemon takes no arguments: there is one of it, and it is
+    /// found through the socket rather than named.
+    #[test]
+    fn shutdown_takes_nothing() {
+        assert!(matches!(
+            parse(&["caw", "shutdown"]).command,
+            Command::Shutdown
+        ));
+        assert!(Cli::try_parse_from(["caw", "shutdown", "cawd"]).is_err());
     }
 
     /// The port commands keep the shape they already had.

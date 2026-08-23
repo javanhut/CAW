@@ -38,6 +38,30 @@ use crate::{Error, log};
 /// has gone wrong rather than gone slowly.
 const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long after start-up the first autoconnect attempt is made.
+///
+/// Short, because this is the delay between power-on and having a network, but
+/// not zero: a radio that has just been probed may still be settling, and
+/// rfkill is often cleared a moment after the module loads.
+const AUTOCONNECT_START: Duration = Duration::from_secs(2);
+
+/// The first retry interval after an attempt that found nothing to join.
+const AUTOCONNECT_MIN: Duration = Duration::from_secs(10);
+
+/// The longest the loop will ever wait between attempts.
+///
+/// A laptop carried into range of a saved network should find it within a few
+/// minutes without anybody typing anything.
+const AUTOCONNECT_MAX: Duration = Duration::from_secs(300);
+
+/// How long to leave a connection alone before looking again.
+///
+/// Once a network is joined `caw-core` does its own reconnecting, with its own
+/// backoff, so this loop has nothing to do until that gives up entirely. One
+/// wakeup a minute to notice that is cheaper than the plumbing needed to be
+/// told about it.
+const AUTOCONNECT_SETTLED: Duration = Duration::from_secs(60);
+
 /// What a timer belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
@@ -46,6 +70,8 @@ pub enum Key {
     /// A scan one client is waiting on. Keyed by client, because two of them
     /// can be waiting on the same scan with different deadlines.
     Scan(ClientId),
+    /// The next turn of the daemon's own connect loop.
+    Autoconnect,
 }
 
 /// Which descriptor woke us.
@@ -88,11 +114,15 @@ pub struct Reactor {
     /// interface to belong to.
     eapol: Option<EapolSocket>,
     scans: Vec<PendingScan>,
+    /// Join saved networks without being asked. Off with `--no-autoconnect`.
+    autoconnect: bool,
+    /// Consecutive attempts that left the radio idle, for the backoff.
+    auto_attempts: u32,
     stopping: bool,
 }
 
 impl Reactor {
-    pub fn new(socket: &std::path::Path) -> Result<Self, Error> {
+    pub fn new(socket: &std::path::Path, autoconnect: bool) -> Result<Self, Error> {
         let ipc = Server::bind(socket)?;
         log::info(format_args!("listening on {}", socket.display()));
 
@@ -134,11 +164,21 @@ impl Reactor {
             links,
             eapol: None,
             scans: Vec::new(),
+            autoconnect,
+            auto_attempts: 0,
             stopping: false,
         })
     }
 
     pub fn run(&mut self) -> Result<(), Error> {
+        if self.autoconnect {
+            self.timers
+                .arm(Key::Autoconnect, AUTOCONNECT_START, Instant::now());
+        }
+        // Before the first `wait`, because nothing has dispatched yet and
+        // `rearm` at the foot of the loop has not run.
+        self.rearm()?;
+
         while !self.stopping {
             let ready = match self.wait() {
                 Ok(ready) => ready,
@@ -251,6 +291,7 @@ impl Reactor {
                     self.finish_scan(client, Response::error("scan timed out"));
                 }
                 Key::Core(id) => self.with_engine(|engine, ports| engine.on_timer(id, ports)),
+                Key::Autoconnect => self.on_autoconnect(),
             }
         }
     }
@@ -474,7 +515,7 @@ impl Reactor {
             .link_by_name(name)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no such port: {name}"))?;
-        rtnl.set_up(link.index, up).map_err(|e| e.to_string())
+        self.set_link_up(link.index, up)
     }
 
     fn status(&mut self) -> ConnectionStatus {
@@ -586,6 +627,58 @@ impl Reactor {
         self.ipc.send(client, response);
     }
 
+    /// One turn of the daemon's own connect loop.
+    ///
+    /// The loop is the last mile of a decision that was already made in
+    /// `caw-core`: profiles carry an `autoconnect` flag,
+    /// [`caw_core::policy::best_known`] picks among the ones that have it set,
+    /// and until now nothing called it. All that happens here is the timing —
+    /// when to look, and how long to wait after looking found nothing.
+    fn on_autoconnect(&mut self) {
+        if !self.autoconnect {
+            return;
+        }
+
+        // A link already up, or an attempt already under way, is the outcome
+        // this loop exists to produce. `caw-core` retries a network it has
+        // joined with a backoff of its own, so there is nothing to do until it
+        // gives up and lands back in `Idle`.
+        if !self.engine.is_idle() {
+            self.auto_attempts = 0;
+            self.timers
+                .arm(Key::Autoconnect, AUTOCONNECT_SETTLED, Instant::now());
+            return;
+        }
+
+        if let Err(e) = self.begin_autoconnect() {
+            // Not a warning: no radio, no saved network and a rfkill'd device
+            // all land here, and none of them is a fault on a machine whose
+            // owner uses a cable.
+            log::info(format_args!("autoconnect: {e}"));
+        }
+        self.auto_attempts = self.auto_attempts.saturating_add(1);
+        let delay = autoconnect_backoff(self.auto_attempts);
+        self.timers.arm(Key::Autoconnect, delay, Instant::now());
+    }
+
+    /// Start one autoconnect attempt.
+    ///
+    /// The interface is brought up first because the case this exists for is a
+    /// machine that has just booted, where the radio is administratively down
+    /// and nothing has run `caw port up` — an autoconnect that refused to
+    /// touch the link would have nothing to scan with.
+    fn begin_autoconnect(&mut self) -> Result<(), String> {
+        let ifindex = self.wireless_ifindex(None)?;
+        self.set_link_up(ifindex, true)?;
+        self.with_engine(|engine, ports| engine.autoconnect(ifindex, ports))
+    }
+
+    /// Bring a link up or down by index, for the paths that already have one.
+    fn set_link_up(&mut self, ifindex: u32, up: bool) -> Result<(), String> {
+        let rtnl = self.rtnl.as_mut().ok_or("rtnetlink is not available")?;
+        rtnl.set_up(ifindex, up).map_err(|e| e.to_string())
+    }
+
     /// The interface a wireless request applies to.
     ///
     /// With no port named, the single station-mode interface is the obvious
@@ -622,4 +715,36 @@ impl Reactor {
     }
 }
 
+/// How long to wait after `attempts` consecutive tries left the radio idle.
+///
+/// Doubling from [`AUTOCONNECT_MIN`] to [`AUTOCONNECT_MAX`]. A scan costs air
+/// time on every channel the regulatory domain allows, so a machine sitting
+/// somewhere with no saved network in range should not keep paying for it
+/// every ten seconds all day.
+fn autoconnect_backoff(attempts: u32) -> Duration {
+    let doublings = attempts.saturating_sub(1).min(16);
+    let secs = AUTOCONNECT_MIN
+        .as_secs()
+        .saturating_mul(1u64 << doublings)
+        .min(AUTOCONNECT_MAX.as_secs());
+    Duration::from_secs(secs)
+}
+
 const NO_WIRELESS: &str = "no wireless stack: the kernel has no nl80211 family";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_backoff_climbs_and_then_stops() {
+        assert_eq!(autoconnect_backoff(1), AUTOCONNECT_MIN);
+        assert_eq!(autoconnect_backoff(2), Duration::from_secs(20));
+        assert_eq!(autoconnect_backoff(3), Duration::from_secs(40));
+        assert_eq!(autoconnect_backoff(6), AUTOCONNECT_MAX);
+        // Whatever it is fed, including the count a daemon left running for
+        // months would reach.
+        assert_eq!(autoconnect_backoff(u32::MAX), AUTOCONNECT_MAX);
+        assert_eq!(autoconnect_backoff(0), AUTOCONNECT_MIN);
+    }
+}

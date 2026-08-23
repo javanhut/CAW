@@ -33,6 +33,10 @@ impl Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_cawd"))
             .arg("--socket")
             .arg(&socket)
+            // These tests are about the protocol, not about radios. A daemon
+            // that started joining saved networks would take whatever wireless
+            // hardware the host has with it.
+            .arg("--no-autoconnect")
             .spawn()
             .expect("cawd starts");
         Self { child, socket }

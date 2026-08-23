@@ -35,7 +35,9 @@ pub struct Profile {
     #[serde(with = "security_str")]
     pub security: Security,
     pub credential: Credential,
-    /// Join this network without being asked when it is in range.
+    /// Join this network without being asked when it is in range. See
+    /// [`Profile::new`] for why a credential-less network does not get this by
+    /// default.
     pub autoconnect: bool,
     /// Refuse to join this SSID with weaker security than first seen, so an
     /// attacker cannot present an open network under a known name and collect
@@ -48,12 +50,21 @@ impl Profile {
     /// A profile for a network just joined, recording its security as the
     /// floor for every later join. See [`crate::policy::security_floor`] for
     /// why the recorded floor is not always the observed level.
+    ///
+    /// Autoconnect is on for anything with a credential behind it and off for
+    /// anything without. A PSK or SAE network proves it is itself — an
+    /// impostor broadcasting the SSID cannot finish the handshake — but an
+    /// open network authenticates nothing, so a saved one is just a name
+    /// anybody in range can also broadcast, and `min_security` has nothing to
+    /// bite on when the recorded floor is already Open. Turning the field back
+    /// on is a deliberate edit of the profile.
     pub fn new(ssid: Vec<u8>, security: Security, credential: Credential) -> Self {
+        let autoconnect = !matches!(credential, Credential::None);
         Self {
             ssid,
             security,
             credential,
-            autoconnect: true,
+            autoconnect,
             min_security: crate::policy::security_floor(security),
         }
     }

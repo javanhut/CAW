@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         Command::Connect { ssid, port } => wireless::connect(&ssid, port),
         Command::Disconnect { ssid } => wireless::disconnect(&ssid),
         Command::Status => wireless::status(),
+        Command::Shutdown => wireless::shutdown(),
     };
 
     match result {

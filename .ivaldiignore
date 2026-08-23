@@ -25,3 +25,4 @@
 # Cargo.lock is intentionally NOT ignored: caw ships binaries, so the lock
 # file is part of the source and `make` builds with --locked against it.
 .lazy/
+target/

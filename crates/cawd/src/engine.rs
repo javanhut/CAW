@@ -113,8 +113,20 @@ impl Engine {
     }
 
     pub fn state_name(&self) -> String {
-        let state = self.core.as_ref().map_or(State::Idle, Connection::state);
-        format!("{state:?}")
+        format!("{:?}", self.state())
+    }
+
+    fn state(&self) -> State {
+        self.core.as_ref().map_or(State::Idle, Connection::state)
+    }
+
+    /// Nothing joined and nothing being joined.
+    ///
+    /// What the reactor's autoconnect loop asks before it starts an attempt,
+    /// so a link already up — or one `caw-core` is already re-establishing —
+    /// is left alone.
+    pub fn is_idle(&self) -> bool {
+        self.state() == State::Idle
     }
 
     /// Join a network. Progress reaches `client` as events until the
@@ -148,6 +160,22 @@ impl Engine {
             }),
             ports,
         );
+        Ok(())
+    }
+
+    /// Join the strongest known network in range, with nobody watching.
+    ///
+    /// The one entry point with no [`ClientId`]: it is the daemon acting on
+    /// its own, so there is nobody to prompt and nobody to answer. That is
+    /// also why it cannot join a network with no saved credential —
+    /// `Action::RequestSecret` with no watcher is reported as a failure — and
+    /// why [`caw_core::policy::best_known`] only ever offers saved ones.
+    ///
+    /// This is where the profile store is first read on a machine that has not
+    /// been told to connect to anything: [`Self::prepare`] loads it.
+    pub fn autoconnect(&mut self, ifindex: u32, ports: &mut Ports<'_>) -> Result<(), String> {
+        self.prepare(ifindex, ports)?;
+        self.feed(Input::Command(Command::Autoconnect), ports);
         Ok(())
     }
 
@@ -225,7 +253,7 @@ impl Engine {
 
     /// Leave the air cleanly on the way out.
     pub fn shut_down(&mut self, ports: &mut Ports<'_>) {
-        if self.core.is_some() && self.state_name() != "Idle" {
+        if self.core.is_some() && !self.is_idle() {
             self.feed(Input::Command(Command::Disconnect), ports);
         }
     }

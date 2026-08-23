@@ -7,6 +7,14 @@ After=sysinit.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/cawd
+
+# cawd has no SIGTERM handler: there is no safe path from a signal to a
+# pollable descriptor without libc, and every crate is #![forbid(unsafe_code)].
+# `caw shutdown` asks over the socket instead, so the station deauthenticates
+# and the access point frees the slot rather than holding it until a timeout.
+# systemd still sends SIGTERM afterwards, which the daemon has usually beaten.
+ExecStop=/usr/bin/caw shutdown
+
 Restart=on-failure
 RestartSec=2
 

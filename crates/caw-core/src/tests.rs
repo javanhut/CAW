@@ -1150,10 +1150,133 @@ fn an_enterprise_profile_without_a_trust_anchor_is_refused() {
     assert_eq!(connection.state(), State::Idle);
 }
 
+// -- autoconnect -----------------------------------------------------------
+
+/// The daemon's connect loop, end to end at this layer: no SSID goes in, and
+/// the network is chosen out of the scan by `policy::best_known`.
+#[test]
+fn an_autoconnect_picks_the_network_out_of_the_scan() {
+    const OTHER_SSID: &[u8] = b"Cafe";
+
+    let mut connection = Connection::new(device(), vec![profile_with(PASSPHRASE)]);
+    let out = connection.poll(Input::Command(Command::Autoconnect));
+    assert_eq!(tags(&out), ["Notify", "TriggerScan", "SetTimer"]);
+    assert_eq!(connection.state(), State::Scanning);
+    assert!(
+        connection.ssid().is_none(),
+        "which network is not decided until the scan comes back"
+    );
+
+    // The unknown network is both stronger and first in the list, and still
+    // loses: a saved network beats an unsaved one however loud it is.
+    let out = connection.poll(Input::ScanResults(vec![
+        bss(OTHER_BSSID, OTHER_SSID, -20, Security::Wpa2Personal),
+        bss(BSSID, SSID, -75, Security::Wpa2Personal),
+    ]));
+    assert_eq!(connection.ssid(), Some(SSID));
+    assert_eq!(assoc_request(&out).bssid, BSSID);
+    assert_eq!(connection.state(), State::Associating);
+}
+
+/// Nothing saved in range is an ordinary outcome, not a fault. It has to be
+/// distinguishable from `NotFound`, because the daemon reports one and retries
+/// the other on its own schedule.
+#[test]
+fn an_autoconnect_with_nothing_known_in_range_reports_and_stops() {
+    let mut connection = Connection::new(device(), vec![profile_with(PASSPHRASE)]);
+    connection.poll(Input::Command(Command::Autoconnect));
+    let out = connection.poll(Input::ScanResults(vec![bss(
+        OTHER_BSSID,
+        b"Cafe",
+        -20,
+        Security::Wpa2Personal,
+    )]));
+
+    assert_eq!(*failure(&out), Failure::NoKnownNetwork);
+    assert_eq!(connection.state(), State::Idle);
+}
+
+/// A profile with the flag off is a network to be asked for by name.
+#[test]
+fn an_autoconnect_skips_a_profile_with_the_flag_off() {
+    let mut profile = profile_with(PASSPHRASE);
+    profile.autoconnect = false;
+    let mut connection = Connection::new(device(), vec![profile]);
+
+    connection.poll(Input::Command(Command::Autoconnect));
+    let out = connection.poll(Input::ScanResults(vec![bss(
+        BSSID,
+        SSID,
+        -50,
+        Security::Wpa2Personal,
+    )]));
+    assert_eq!(*failure(&out), Failure::NoKnownNetwork);
+}
+
+/// The daemon polls on a timer, so an autoconnect arriving on top of a working
+/// connection has to be inert — not a scan, and certainly not a teardown.
+#[test]
+fn an_autoconnect_leaves_a_live_connection_alone() {
+    let (mut connection, _) = connected(vec![profile_with(PASSPHRASE)]);
+    assert!(
+        connection
+            .poll(Input::Command(Command::Autoconnect))
+            .is_empty()
+    );
+    assert_eq!(connection.state(), State::Connected);
+    assert_eq!(connection.ssid(), Some(SSID));
+}
+
+/// A network reached by autoconnect is one the machine was told to hold on to,
+/// so a deauthentication backs off and tries again rather than giving up.
+#[test]
+fn a_network_joined_by_autoconnect_is_reconnected_to() {
+    let mut connection = Connection::new(device(), vec![profile_with(PASSPHRASE)]);
+    connection.poll(Input::Command(Command::Autoconnect));
+    connection.poll(Input::ScanResults(vec![bss(
+        BSSID,
+        SSID,
+        -50,
+        Security::Wpa2Personal,
+    )]));
+
+    let out = connection.poll(Input::Wireless(Event::Disconnected {
+        reason: 7,
+        by_ap: true,
+    }));
+    assert_eq!(connection.state(), State::Reconnecting);
+    assert!(timer(&out, TimerId::ReconnectBackoff) > 0);
+}
+
+/// Autoconnect joins saved networks unattended, and the only thing standing
+/// between "saved" and "joined" for an open network is the SSID — which any
+/// access point in range can broadcast. So a network with nothing to prove is
+/// saved without the flag, and `caw connect` remains the way in.
+#[test]
+fn an_open_network_is_not_saved_as_an_autoconnecting_one() {
+    let open = Profile::new(SSID.to_vec(), Security::Open, Credential::None);
+    assert!(!open.autoconnect);
+    assert!(
+        profile_with(PASSPHRASE).autoconnect,
+        "a handshake proves the access point is the one that was saved"
+    );
+
+    let mut connection = Connection::new(device(), vec![open]);
+    connection.poll(Input::Command(Command::Autoconnect));
+    let out = connection.poll(Input::ScanResults(vec![bss(
+        BSSID,
+        SSID,
+        -50,
+        Security::Open,
+    )]));
+    assert_eq!(*failure(&out), Failure::NoKnownNetwork);
+}
+
 #[test]
 fn every_failure_says_something_a_person_can_act_on() {
     let cases = [
         Failure::NotFound,
+        Failure::NoKnownNetwork,
         Failure::Downgrade {
             recorded: Security::Wpa3Personal,
             offered: Security::Open,

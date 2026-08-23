@@ -94,6 +94,42 @@ caw connect ExampleNetworkName # runs an interactive setup for this network
 caw disconnect ExampleNetworkName
 ```
 
+### Stop the daemon
+
+```bash
+caw shutdown
+```
+
+`cawd` has no SIGTERM handler — there is no safe path from a signal to a
+pollable descriptor without libc, and every crate here forbids unsafe code — so
+this is the graceful way down. The daemon deauthenticates before it exits, and
+the access point frees the station instead of holding it until a timeout.
+`systemctl stop cawd` runs the same thing through `ExecStop=`.
+
+## Autoconnect
+
+Once a network has been joined by name, `cawd` joins it again on its own
+whenever it is in range: it brings the radio up, scans, and connects to the
+strongest saved network it can see. That is what makes the daemon worth
+enabling at boot — otherwise the machine comes up with the radio idle and
+somebody has to be sitting at the console to put it back on the network.
+
+The rules are deliberately narrow:
+
+- **Saved networks only.** Nothing is joined that has not been connected to by
+  hand at least once, and there is nobody to prompt for a passphrase.
+- **Credentialled networks only, by default.** A WPA2/WPA3 network proves it is
+  itself: an impostor broadcasting the SSID cannot finish the handshake. An
+  open network proves nothing, so a saved one is just a name anybody in range
+  can also broadcast — those are saved with `autoconnect` off, and joining one
+  stays a decision you make by typing `caw connect`.
+- **No downgrades.** A profile records the security it was first seen at and
+  refuses anything weaker, so a saved WPA2 network is never joined as an open
+  one under the same name.
+
+Per network, edit `autoconnect` in `/var/lib/caw/profiles/<ssid>`. For the whole
+machine, run the daemon with `--no-autoconnect`.
+
 ## Status
 
 Working: `caw ports`, `caw port up`, `caw port info`.
