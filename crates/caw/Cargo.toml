@@ -4,9 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Deliberately short: the CLI renders what the daemon tells it and knows
+# nothing about WPA, so caw-crypto, caw-eapol and caw-nl80211 must never
+# appear here or anywhere below.
 [dependencies]
 caw-ipc.workspace = true
-caw-netlink.workspace = true
 caw-rtnl.workspace = true
 clap.workspace = true
-serde_json.workspace = true
+# `termios` is not among the workspace's shared rustix features because it is
+# wanted here alone: the passphrase prompt has to turn echo off.
+rustix = { workspace = true, features = ["termios"] }
+zeroize.workspace = true

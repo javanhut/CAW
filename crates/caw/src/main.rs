@@ -5,16 +5,24 @@
 //! no daemon, and requiring one would add a failure mode to commands that need
 //! nothing. Wireless commands do need the daemon, because a connection has to
 //! outlive the process that started it, and those go over the socket.
+//!
+//! Nothing here links the crypto or wireless stack; the CLI's whole knowledge
+//! of WPA is the security string the daemon sends it to print.
 #![forbid(unsafe_code)]
 
 mod cli;
+mod ipc;
 mod port;
+mod prompt;
+mod render;
+mod table;
+mod wireless;
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, PortAction};
+use crate::cli::{AddressMode, Cli, Command, PortAction};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -28,13 +36,14 @@ fn main() -> ExitCode {
                 protocol,
                 mac,
             } => port::info(&name, protocol, mac),
-            PortAction::Set { name, mode } => {
-                not_implemented(&format!("port set {name} {}", mode_name(&mode)))
-            }
+            PortAction::Set { name, mode } => match mode {
+                AddressMode::Dhcp => wireless::set_dhcp(&name),
+            },
         },
-        Command::Scan => not_implemented("scan"),
-        Command::Connect { ssid } => not_implemented(&format!("connect {ssid}")),
-        Command::Disconnect { ssid } => not_implemented(&format!("disconnect {ssid}")),
+        Command::Scan { port } => wireless::scan(port),
+        Command::Connect { ssid, port } => wireless::connect(&ssid, port),
+        Command::Disconnect { ssid } => wireless::disconnect(&ssid),
+        Command::Status => wireless::status(),
     };
 
     match result {
@@ -44,14 +53,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn mode_name(mode: &cli::AddressMode) -> &'static str {
-    match mode {
-        cli::AddressMode::Dhcp => "dhcp",
-    }
-}
-
-fn not_implemented(what: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!("`{what}` is not implemented yet").into())
 }

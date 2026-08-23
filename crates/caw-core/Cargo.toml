@@ -4,11 +4,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+
+# WPA2/3-Enterprise. Only widens what a profile can be connected with: the
+# `Credential::Enterprise` type is always present, so a profile written by an
+# enterprise build still loads in a default one and fails with a clear reason
+# rather than a parse error.
+enterprise = ["caw-eapol/enterprise"]
+
 [dependencies]
 caw-80211.workspace = true
 caw-crypto.workspace = true
 caw-dhcp.workspace = true
 caw-eapol.workspace = true
 caw-nl80211.workspace = true
-caw-rtnl.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 zeroize.workspace = true
+
+# The scripted authenticator the lifecycle tests run against has to wrap the
+# key data message 3 carries, which no station ever does.
+[dev-dependencies]
+aes-kw.workspace = true

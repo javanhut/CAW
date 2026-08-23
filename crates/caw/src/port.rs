@@ -32,11 +32,11 @@ pub fn list() -> Result<()> {
     let links = rtnl.links()?;
     let addrs = rtnl.addresses()?;
 
-    let rows: Vec<[String; 5]> = links
+    let rows: Vec<Vec<String>> = links
         .iter()
         .map(|l| {
             let a = addrs_for(&addrs, l.index);
-            [
+            vec![
                 l.name.clone(),
                 l.kind.as_str().to_owned(),
                 state_of(l).to_owned(),
@@ -50,31 +50,10 @@ pub fn list() -> Result<()> {
         })
         .collect();
 
-    let headers = ["NAME", "TYPE", "STATE", "MAC", "ADDRESSES"];
-    // Width every column to its widest cell, leaving the last one ragged.
-    let mut widths = headers.map(str::len);
-    for row in &rows {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.len());
-        }
-    }
-
-    let line = |cells: &[String; 5]| {
-        let mut s = String::new();
-        for (i, (cell, w)) in cells.iter().zip(widths).enumerate() {
-            if i + 1 == cells.len() {
-                s.push_str(cell);
-            } else {
-                s.push_str(&format!("{cell:<w$}  ", w = w));
-            }
-        }
-        s
-    };
-
-    println!("{}", line(&headers.map(str::to_owned)));
-    for row in &rows {
-        println!("{}", line(row));
-    }
+    print!(
+        "{}",
+        crate::table::render(&["NAME", "TYPE", "STATE", "MAC", "ADDRESSES"], &rows,)
+    );
     Ok(())
 }
 

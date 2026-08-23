@@ -4,8 +4,42 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+
+# WPA2/3-Enterprise: 802.1X with EAP-TLS, PEAP and TTLS.
+#
+# Off by default, and it is the only feature in the workspace that is. `rustls`
+# needs a crypto provider, and today every one of them is a compromise: two are
+# C, and the pure-Rust one is an alpha. Turning this on is therefore a choice
+# about which compromise the build makes, and a default cannot make that choice
+# honestly — see `eap::tls::provider`. With the feature off the dependency
+# tree contains no TLS stack at all, which is what keeps `cargo tree` free of
+# `ring` and `aws-lc-sys`.
+enterprise = ["dep:rustls", "dep:md4", "dep:des", "dep:sha1"]
+
 [dependencies]
 caw-crypto.workspace = true
 caw-80211.workspace = true
 rustix.workspace = true
 zeroize.workspace = true
+
+# `custom-provider` is what lets rustls build with neither `ring` nor
+# `aws-lc-rs` compiled in; the provider arrives at runtime instead.
+# `tls12` is not optional in practice: PEAP and TTLS predate TLS 1.3 and no
+# deployed RADIUS server offers them over it.
+rustls = { workspace = true, optional = true, features = ["std", "tls12", "custom-provider"] }
+
+# MSCHAPv2's primitives, and only MSCHAPv2's. They are declared here rather
+# than in the workspace because nothing else in caw should ever want MD4 or
+# single-DES: both are broken, and RFC 2759 is the one place their use is
+# forced by an existing protocol rather than chosen.
+md4 = { version = "0.11", optional = true }
+des = { version = "0.9", optional = true }
+sha1 = { workspace = true, optional = true }
+
+# The scripted authenticator in the tests has to wrap the key data message 3
+# carries. Only unwrapping belongs in caw-crypto, because a station never
+# distributes a group key.
+[dev-dependencies]
+aes-kw.workspace = true

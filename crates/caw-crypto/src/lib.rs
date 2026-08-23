@@ -26,6 +26,18 @@
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+mod kdf;
+mod keywrap;
+mod mic;
+mod psk;
+mod sae;
+
+pub use kdf::{derive_ptk, kdf_sha256, prf_sha1};
+pub use keywrap::unwrap_key_data;
+pub use mic::{KeyDescriptorVersion, MIC_LEN, compute_mic, verify_mic};
+pub use psk::{PskProvider, derive_pmk};
+pub use sae::{SEED_LEN, SaeProvider};
+
 /// Pairwise Master Key: the output of authentication, input to the 4-way.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct Pmk(pub [u8; 32]);
@@ -84,29 +96,6 @@ pub trait PmkProvider {
     fn on_timeout(&mut self, ctx: &AuthContext<'_>) -> Result<Step, Error>;
 }
 
-/// WPA2-Personal: PMK = PBKDF2-HMAC-SHA1(passphrase, ssid, 4096, 256).
-pub struct PskProvider {
-    _passphrase: String,
-}
-
-/// WPA3-Personal: Dragonfly over NIST P-256, commit/confirm.
-pub struct SaeProvider {
-    _passphrase: String,
-}
-
-/// Derives the PTK from a PMK and the two nonces. The KDF and MIC algorithm
-/// both depend on the negotiated AKM, which is why it is threaded through.
-pub fn derive_ptk(
-    _pmk: &Pmk,
-    _akm: caw_80211::Akm,
-    _aa: [u8; 6],
-    _spa: [u8; 6],
-    _anonce: &[u8; 32],
-    _snonce: &[u8; 32],
-) -> Result<Ptk, Error> {
-    todo!("PRF-384/512, or SHA-256/384 KDF for the newer AKMs")
-}
-
 #[derive(Debug)]
 pub enum Error {
     /// The peer's MIC did not verify — wrong passphrase, or a downgrade attempt.
@@ -115,4 +104,44 @@ pub enum Error {
     UnsupportedAkm,
     /// SAE rejected the exchange.
     AuthFailed,
+    /// The EAPOL-Key descriptor version asks for a MIC algorithm caw does not
+    /// implement. Version 1 is the TKIP pairing, and caw joins CCMP networks
+    /// only.
+    UnsupportedVersion,
+    /// AES key unwrap failed its integrity check: the KEK is wrong, or the
+    /// wrapped key data was tampered with in flight.
+    KeyUnwrapFailed,
+    /// A provider was driven in a way its stage never produces — a frame
+    /// delivered to a `Local` provider, say. A caller bug, not a peer's.
+    Protocol,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::MicMismatch => write!(f, "EAPOL-Key MIC mismatch (wrong passphrase?)"),
+            Error::Malformed => write!(f, "malformed input"),
+            Error::UnsupportedAkm => write!(f, "unsupported AKM suite"),
+            Error::AuthFailed => write!(f, "authentication rejected"),
+            Error::UnsupportedVersion => write!(f, "unsupported EAPOL-Key descriptor version"),
+            Error::KeyUnwrapFailed => write!(f, "key unwrap integrity check failed"),
+            Error::Protocol => write!(f, "authentication driven out of order"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Decode a test vector. Vectors are quoted from their RFC or standard as hex
+/// so they stay diff-able against the published text.
+#[cfg(test)]
+pub(crate) fn hex(s: &str) -> Vec<u8> {
+    assert!(
+        s.len().is_multiple_of(2),
+        "hex vector has an odd number of digits"
+    );
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex vector has a non-hex digit"))
+        .collect()
 }

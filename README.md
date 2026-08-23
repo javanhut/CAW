@@ -11,9 +11,18 @@ never shells out to another program.
 - **Opinionated.** One command and one prompt to join a network.
 - **Out of the way.** Commands that need no daemon do not use one.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it all fits together.
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it all fits together.
 
-## Install
+## Required Installations
+
+- Make
+- Rust
+
+## Optional Installations
+
+- [ImLazy](https://github.com/javanhut/ImLazy.git)
+
+## Make Install
 
 ```bash
 make
@@ -31,11 +40,19 @@ dependency; the default build stays pure Rust:
 make FEATURES=enterprise
 ```
 
+## ImLazy Install
+
+```bash
+imlazy
+sudo imlazy install
+sudo systemctl enable --now cawd
+```
+
 ## Quick start
 
 ### Activate an ethernet port
 
-*(example port name eth0)*
+_(example port name eth0)_
 
 ```bash
 caw ports                     # List ports
@@ -83,7 +100,7 @@ Working: `caw ports`, `caw port up`, `caw port info`.
 
 Planned: `port set`, `scan`, `connect`, `disconnect`. These parse and exit
 non-zero with a message. The roadmap is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#11-status).
+[ARCHITECTURE.md](docs/ARCHITECTURE.md#11-status).
 
 ## Development
 

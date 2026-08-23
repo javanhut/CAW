@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 caw-netlink.workspace = true
 caw-80211.workspace = true
+rustix.workspace = true

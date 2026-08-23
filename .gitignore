@@ -2,6 +2,7 @@
 # kept separate because its artifacts are a different arch and libc.
 /target/
 /target-container/
+/target-wf/
 
 # makepkg builds in place and creates these next to the PKGBUILD.
 /pkg/

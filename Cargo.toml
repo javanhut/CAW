@@ -22,7 +22,7 @@ caw-nl80211  = { path = "crates/caw-nl80211" }
 caw-rtnl     = { path = "crates/caw-rtnl" }
 
 clap    = { version = "4.6.6", features = ["derive"] }
-rustix  = { version = "1.1.4", default-features = false, features = ["std", "net", "event", "time", "process"] }
+rustix  = { version = "1.1.4", default-features = false, features = ["std", "net", "event", "time", "process", "rand", "fs", "pipe"] }
 serde   = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = { version = "1.9", features = ["derive"] }
@@ -36,3 +36,9 @@ pbkdf2  = { version = "0.13", default-features = false, features = ["hmac"] }
 sha1    = "0.11"
 sha2    = "0.11"
 p256    = "0.14"
+subtle  = "2.6"
+hkdf    = "0.13"
+
+# Enterprise (802.1X) only. Pulls in a C crypto provider, so every crate that
+# uses it must keep it behind the `enterprise` feature.
+rustls  = { version = "0.23", default-features = false }
