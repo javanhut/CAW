@@ -9,7 +9,7 @@
 //!
 //! # What cannot be performed yet
 //!
-//! Four actions have no transport under them, and each returns an error
+//! Two actions have no transport under them, and each returns an error
 //! naming what is missing rather than pretending to succeed:
 //!
 //!   * `SendMgmtFrame` — SAE's commit and confirm need `NL80211_CMD_FRAME`,
@@ -18,18 +18,19 @@
 //!     the handshake in firmware wants `NL80211_ATTR_PMK` or
 //!     `NL80211_ATTR_SAE_PASSWORD` in the connect request, and
 //!     `caw_nl80211::Connect` has no field for either.
-//!   * `StartDhcp` and `ApplyLease` — the DHCP client is not in the poll set,
-//!     and `caw-rtnl` cannot add an address or a route.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use caw_core::{Action, Command, Connection, Device, DeviceCaps, Input, State, TimerId, profile};
+use caw_core::{
+    Action, Command, Connection, Device, DeviceCaps, Input, LeaseEvent, State, TimerId, profile,
+};
+use caw_dhcp::{Dhcp4, Dhcp4Socket};
 use caw_eapol::EapolSocket;
 use caw_ipc::{Event, Response, SecretKind};
 use caw_nl80211::{Connect, KeyScope, Nl80211};
-use caw_rtnl::format_mac;
+use caw_rtnl::{Rtnl, format_mac};
 
 use crate::ipc::{ClientId, Server};
 use crate::log;
@@ -43,9 +44,19 @@ use crate::timers::Timers;
 pub struct Ports<'a> {
     pub nl: Option<&'a mut Nl80211>,
     pub eapol: &'a mut Option<EapolSocket>,
+    pub rtnl: Option<&'a mut Rtnl>,
+    /// The DHCPv4 exchange in progress, if any. Owned by the reactor so its
+    /// socket sits in the poll set; driven from here.
+    pub dhcp: &'a mut Option<DhcpRun>,
     pub timers: &'a mut Timers<Key>,
     pub server: &'a mut Server,
     pub now: Instant,
+}
+
+/// One DHCPv4 exchange: the state machine and the socket it speaks through.
+pub struct DhcpRun {
+    pub socket: Dhcp4Socket,
+    pub machine: Dhcp4,
 }
 
 impl Ports<'_> {
@@ -233,6 +244,18 @@ impl Engine {
         self.feed(Input::Eapol(frame), ports);
     }
 
+    pub fn on_dhcp_datagram(&mut self, bytes: &[u8], ports: &mut Ports<'_>) {
+        if let Some(event) = Self::drive_dhcp(ports, caw_dhcp::Input::Datagram(bytes)) {
+            self.feed(Input::Lease(event), ports);
+        }
+    }
+
+    pub fn on_dhcp_timer(&mut self, timer: caw_dhcp::Timer, ports: &mut Ports<'_>) {
+        if let Some(event) = Self::drive_dhcp(ports, caw_dhcp::Input::Timeout(timer)) {
+            self.feed(Input::Lease(event), ports);
+        }
+    }
+
     pub fn on_timer(&mut self, id: TimerId, ports: &mut Ports<'_>) {
         self.feed(Input::Timer(id), ports);
     }
@@ -279,6 +302,7 @@ impl Engine {
             self.core = Some(Connection::new(device, profiles));
             self.device = Some(device);
             *ports.eapol = None;
+            Self::stop_dhcp(ports);
         }
 
         if ports.eapol.is_none() {
@@ -429,19 +453,66 @@ impl Engine {
             }
 
             Action::StartDhcp => {
-                return Err(
-                    "address configuration is not wired up yet: the DHCP client is not in \
-                     the reactor's poll set"
-                        .to_owned(),
-                );
+                let ifindex = self.ifindex().ok_or("no interface for DHCP")?;
+                let mac = self.device.map(|d| d.mac).ok_or("no device MAC for DHCP")?;
+
+                // 255.255.255.255 needs a route before the interface has an
+                // address; see `Rtnl::add_broadcast_route`. Best-effort: on a
+                // machine that already carries the route this is a no-op, and
+                // on one where rtnetlink is gone the DISCOVER send will say so.
+                if let Some(rtnl) = ports.rtnl.as_mut()
+                    && let Err(e) = rtnl.add_broadcast_route(ifindex)
+                {
+                    log::warn(format_args!("dhcp: broadcast route: {e}"));
+                }
+
+                let socket = Dhcp4Socket::open().map_err(|e| {
+                    format!("cannot open the DHCP socket (binding port 68 needs root): {e}")
+                })?;
+                let xid = caw_dhcp::new_xid().map_err(|e| e.to_string())?;
+                let mut machine = Dhcp4::new(mac, xid);
+                if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+                    let hostname = hostname.trim();
+                    if !hostname.is_empty() {
+                        machine = machine.with_hostname(hostname);
+                    }
+                }
+                *ports.dhcp = Some(DhcpRun { socket, machine });
+
+                if let Some(event) = Self::drive_dhcp(ports, caw_dhcp::Input::Start(xid)) {
+                    return Ok(Some(Input::Lease(event)));
+                }
             }
 
-            Action::ApplyLease(_) => {
-                return Err(
-                    "caw-rtnl cannot add an address or a route yet, so a lease cannot be \
-                     applied"
-                        .to_owned(),
-                );
+            Action::ApplyLease(lease) => {
+                let ifindex = self.ifindex().ok_or("no interface to configure")?;
+                let rtnl = ports
+                    .rtnl
+                    .as_mut()
+                    .ok_or("no rtnetlink socket to apply the lease")?;
+                rtnl.add_address(ifindex, lease.addr, lease.prefix_len)
+                    .map_err(|e| {
+                        format!("cannot add {}/{}: {e}", lease.addr, lease.prefix_len)
+                    })?;
+                if let Some(gateway) = lease.gateway {
+                    rtnl.add_default_route(ifindex, gateway)
+                        .map_err(|e| format!("cannot add the default route via {gateway}: {e}"))?;
+                }
+                // The resolver is a file, not a netlink object, and a lease
+                // without working DNS looks exactly like no connection at
+                // all. Failure to write it is worth a line, not the lease.
+                if let Err(e) = write_resolv_conf(&lease.dns) {
+                    log::warn(format_args!("dhcp: resolv.conf: {e}"));
+                }
+                log::info(format_args!(
+                    "dhcp: {}/{} on ifindex {ifindex}{}",
+                    lease.addr,
+                    lease.prefix_len,
+                    lease
+                        .gateway
+                        .map(|g| format!(", default route via {g}"))
+                        .unwrap_or_default()
+                ));
             }
 
             Action::SetTimer { id, millis } => {
@@ -500,8 +571,9 @@ impl Engine {
                 self.pending_secret = None;
                 if terminal {
                     // Nothing further will happen without a new command, so
-                    // the packet socket has no reason to stay open.
+                    // neither socket has a reason to stay open.
                     *ports.eapol = None;
+                    Self::stop_dhcp(ports);
                 }
             }
         }
@@ -540,6 +612,50 @@ impl Engine {
         }
     }
 
+    /// Push one input through the DHCP machine and perform what it asks.
+    ///
+    /// Returns the lease event to feed `caw-core`, if this input produced one.
+    /// Associated rather than a method so it can run while `self` is borrowed.
+    fn drive_dhcp(ports: &mut Ports<'_>, input: caw_dhcp::Input<'_>) -> Option<LeaseEvent> {
+        let run = ports.dhcp.as_mut()?;
+        let mut out = None;
+        for action in run.machine.poll(input) {
+            match action {
+                caw_dhcp::Action::Broadcast(data) => {
+                    if let Err(e) = run.socket.send_broadcast(&data) {
+                        log::warn(format_args!("dhcp: broadcast send: {e}"));
+                    }
+                }
+                caw_dhcp::Action::Unicast { to, data } => {
+                    if let Err(e) = run.socket.send_to(to, &data) {
+                        log::warn(format_args!("dhcp: send to {to}: {e}"));
+                    }
+                }
+                caw_dhcp::Action::SetTimer { timer, secs } => {
+                    ports
+                        .timers
+                        .arm(Key::Dhcp(timer), Duration::from_secs(secs.into()), ports.now);
+                }
+                caw_dhcp::Action::Configured(lease) => {
+                    out = Some(LeaseEvent::Acquired(lease));
+                }
+                caw_dhcp::Action::Deconfigure(reason) => {
+                    out = Some(LeaseEvent::Lost(reason));
+                }
+            }
+        }
+        out
+    }
+
+    /// End any DHCP exchange and disarm its timers.
+    fn stop_dhcp(ports: &mut Ports<'_>) {
+        use caw_dhcp::Timer;
+        *ports.dhcp = None;
+        for timer in [Timer::Retransmit, Timer::Renew, Timer::Rebind, Timer::Expire] {
+            ports.timers.cancel(Key::Dhcp(timer));
+        }
+    }
+
     /// An action could not be performed. Report it the way `caw-core` reports
     /// a failure, so a client sees one shape of ending rather than two.
     fn abort(&mut self, reason: String, ports: &mut Ports<'_>) {
@@ -555,4 +671,21 @@ impl Engine {
         }
         self.pending_secret = None;
     }
+}
+
+/// Point the resolver at the lease's DNS servers.
+///
+/// Written atomically -- temp file, then rename -- because a half-written
+/// resolv.conf turns every lookup on the machine into a parse error.
+fn write_resolv_conf(servers: &[std::net::Ipv4Addr]) -> std::io::Result<()> {
+    if servers.is_empty() {
+        return Ok(());
+    }
+    let mut text = String::from("# Written by cawd from a DHCP lease.\n");
+    for server in servers {
+        text.push_str(&format!("nameserver {server}\n"));
+    }
+    let tmp = "/etc/.resolv.conf.cawd";
+    std::fs::write(tmp, &text)?;
+    std::fs::rename(tmp, "/etc/resolv.conf")
 }

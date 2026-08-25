@@ -6,16 +6,19 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use caw_netlink::{Error, MsgBuilder, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, Socket};
+use caw_netlink::{Error, MsgBuilder, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_REPLACE, NLM_F_REQUEST, Socket};
 
 // rtnetlink message types.
 const RTM_NEWLINK: u16 = 16;
 const RTM_GETLINK: u16 = 18;
+const RTM_NEWADDR: u16 = 20;
 const RTM_GETADDR: u16 = 22;
+const RTM_NEWROUTE: u16 = 24;
 
 // Sizes of the fixed family headers that precede the attributes.
 const IFINFOMSG_LEN: usize = 16;
 const IFADDRMSG_LEN: usize = 8;
+const RTMSG_LEN: usize = 12;
 
 // IFLA_* attribute types.
 const IFLA_ADDRESS: u16 = 1;
@@ -26,6 +29,19 @@ const IFLA_OPERSTATE: u16 = 16;
 // IFA_* attribute types.
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+const IFA_BROADCAST: u16 = 4;
+
+// RTA_* attribute types.
+const RTA_DST: u16 = 1;
+const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
+
+// struct rtmsg field values.
+const RT_TABLE_MAIN: u8 = 254;
+const RTPROT_BOOT: u8 = 3;
+const RT_SCOPE_UNIVERSE: u8 = 0;
+const RT_SCOPE_LINK: u8 = 253;
+const RTN_UNICAST: u8 = 1;
 
 // Interface flags.
 const IFF_UP: u32 = 0x1;
@@ -248,6 +264,74 @@ impl Rtnl {
     pub fn link_by_name(&mut self, name: &str) -> Result<Option<Link>, Error> {
         Ok(self.links()?.into_iter().find(|l| l.name == name))
     }
+
+    /// Put an IPv4 address on a link, replacing any previous instance of it.
+    ///
+    /// This is what turns a DHCP lease into a working interface, so its
+    /// absence was the "caw-rtnl cannot add an address" half of the address
+    /// configuration gap. `NLM_F_REPLACE` because a renewed lease is the same
+    /// address arriving again, and a client that errors with EEXIST on its own
+    /// renewal deconfigures itself once an hour.
+    pub fn add_address(
+        &mut self,
+        index: u32,
+        addr: Ipv4Addr,
+        prefix_len: u8,
+    ) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        // The directed broadcast address of the subnet, which the kernel does
+        // not derive on its own for RTM_NEWADDR.
+        let hostmask = u32::MAX.checked_shr(prefix_len as u32).unwrap_or(0);
+        let brd = Ipv4Addr::from_bits(addr.to_bits() | hostmask);
+        let req = MsgBuilder::new(
+            RTM_NEWADDR,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+            seq,
+        )
+        .header(&ifaddrmsg(AF_INET, prefix_len, index))
+        .attr(IFA_LOCAL, &addr.octets())
+        .attr(IFA_ADDRESS, &addr.octets())
+        .attr(IFA_BROADCAST, &brd.octets())
+        .finish();
+        self.sock.request(&req, |_| Ok(()))
+    }
+
+    /// Install the default route through `gateway` on `index`.
+    pub fn add_default_route(&mut self, index: u32, gateway: Ipv4Addr) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let req = MsgBuilder::new(
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+            seq,
+        )
+        .header(&rtmsg(AF_INET, 0, RT_SCOPE_UNIVERSE))
+        .attr(RTA_GATEWAY, &gateway.octets())
+        .attr_u32(RTA_OIF, index)
+        .finish();
+        self.sock.request(&req, |_| Ok(()))
+    }
+
+    /// Route the limited broadcast address out one interface.
+    ///
+    /// A UDP socket with no bound device needs a route to send to
+    /// 255.255.255.255, and an interface that is mid-DHCP has no address from
+    /// which the kernel could infer one. This is how the DHCPv4 socket gets
+    /// its DISCOVER off the machine; `SO_BINDTODEVICE` would express it
+    /// better, but rustix does not carry that option and this crate does not
+    /// carry `unsafe`.
+    pub fn add_broadcast_route(&mut self, index: u32) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let req = MsgBuilder::new(
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+            seq,
+        )
+        .header(&rtmsg(AF_INET, 32, RT_SCOPE_LINK))
+        .attr(RTA_DST, &Ipv4Addr::BROADCAST.octets())
+        .attr_u32(RTA_OIF, index)
+        .finish();
+        self.sock.request(&req, |_| Ok(()))
+    }
 }
 
 /// Encode `struct ifinfomsg`.
@@ -258,6 +342,30 @@ fn ifinfomsg(family: u8, index: u32, flags: u32, change: u32) -> [u8; IFINFOMSG_
     b[4..8].copy_from_slice(&(index as i32).to_ne_bytes());
     b[8..12].copy_from_slice(&flags.to_ne_bytes());
     b[12..16].copy_from_slice(&change.to_ne_bytes());
+    b
+}
+
+/// Encode `struct ifaddrmsg`.
+fn ifaddrmsg(family: u8, prefix_len: u8, index: u32) -> [u8; IFADDRMSG_LEN] {
+    let mut b = [0u8; IFADDRMSG_LEN];
+    b[0] = family;
+    b[1] = prefix_len;
+    // b[2] flags, b[3] scope: zero is flag-free and RT_SCOPE_UNIVERSE.
+    b[4..8].copy_from_slice(&index.to_ne_bytes());
+    b
+}
+
+/// Encode `struct rtmsg` for a unicast route in the main table.
+fn rtmsg(family: u8, dst_len: u8, scope: u8) -> [u8; RTMSG_LEN] {
+    let mut b = [0u8; RTMSG_LEN];
+    b[0] = family;
+    b[1] = dst_len;
+    // b[2] src_len, b[3] tos: zero.
+    b[4] = RT_TABLE_MAIN;
+    b[5] = RTPROT_BOOT;
+    b[6] = scope;
+    b[7] = RTN_UNICAST;
+    // b[8..12] rtm_flags: zero.
     b
 }
 

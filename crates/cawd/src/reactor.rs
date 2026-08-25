@@ -25,7 +25,7 @@ use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
 
 use crate::auth::Database;
-use crate::engine::{Engine, Ports};
+use crate::engine::{DhcpRun, Engine, Ports};
 use crate::ipc::{ClientId, Server};
 use crate::links::{LinkEvent, LinkEvents};
 use crate::timers::{TimerFd, Timers};
@@ -72,6 +72,8 @@ pub enum Key {
     Scan(ClientId),
     /// The next turn of the daemon's own connect loop.
     Autoconnect,
+    /// A deadline in the DHCP exchange: retransmit, T1, T2 or expiry.
+    Dhcp(caw_dhcp::Timer),
 }
 
 /// Which descriptor woke us.
@@ -83,6 +85,7 @@ enum Source {
     Wireless,
     Links,
     Eapol,
+    Dhcp,
 }
 
 /// The nl80211 command socket and its event socket, which only exist on a
@@ -113,6 +116,10 @@ pub struct Reactor {
     /// Opened when a connection starts, because it needs `CAP_NET_RAW` and an
     /// interface to belong to.
     eapol: Option<EapolSocket>,
+    /// The DHCPv4 exchange for the connection in progress; its socket joins
+    /// the poll set for as long as it exists. This being `None` forever was
+    /// the "DHCP client is not in the reactor's poll set" gap.
+    dhcp: Option<DhcpRun>,
     scans: Vec<PendingScan>,
     /// Join saved networks without being asked. Off with `--no-autoconnect`.
     autoconnect: bool,
@@ -163,6 +170,7 @@ impl Reactor {
             rtnl,
             links,
             eapol: None,
+            dhcp: None,
             scans: Vec::new(),
             autoconnect,
             auto_attempts: 0,
@@ -222,6 +230,9 @@ impl Reactor {
         if let Some(eapol) = &self.eapol {
             watch(eapol.as_fd(), PollFlags::IN, Source::Eapol);
         }
+        if let Some(dhcp) = &self.dhcp {
+            watch(dhcp.socket.as_fd(), PollFlags::IN, Source::Dhcp);
+        }
         for client in self.ipc.clients() {
             let flags = if client.has_pending_output() {
                 PollFlags::IN | PollFlags::OUT
@@ -270,6 +281,7 @@ impl Reactor {
             Source::Wireless => self.on_wireless(),
             Source::Links => self.on_links(),
             Source::Eapol => self.on_eapol(),
+            Source::Dhcp => self.on_dhcp(),
         }
     }
 
@@ -292,6 +304,9 @@ impl Reactor {
                 }
                 Key::Core(id) => self.with_engine(|engine, ports| engine.on_timer(id, ports)),
                 Key::Autoconnect => self.on_autoconnect(),
+                Key::Dhcp(timer) => {
+                    self.with_engine(|engine, ports| engine.on_dhcp_timer(timer, ports));
+                }
             }
         }
     }
@@ -371,6 +386,30 @@ impl Reactor {
         }
     }
 
+    fn on_dhcp(&mut self) {
+        // Datagrams first, engine second: the poll array's borrow of the
+        // socket has to end before `with_engine` borrows the same field.
+        let mut datagrams = Vec::new();
+        if let Some(run) = &mut self.dhcp {
+            // 1500 covers any DHCP message a sane server emits; the kernel
+            // truncates larger ones and the machine drops what fails to parse.
+            let mut buf = [0u8; 1500];
+            loop {
+                match run.socket.recv(&mut buf) {
+                    Ok(n) => datagrams.push(buf[..n].to_vec()),
+                    Err(caw_dhcp::Error::Io(Errno::AGAIN)) => break,
+                    Err(e) => {
+                        log::warn(format_args!("dhcp read: {e}"));
+                        break;
+                    }
+                }
+            }
+        }
+        for datagram in datagrams {
+            self.with_engine(|engine, ports| engine.on_dhcp_datagram(&datagram, ports));
+        }
+    }
+
     /// Hand the engine the descriptors it may act on.
     ///
     /// A closure rather than a `ports()` accessor because the borrows have to
@@ -381,6 +420,8 @@ impl Reactor {
         let mut ports = Ports {
             nl: self.wireless.as_mut().map(|w| &mut w.nl),
             eapol: &mut self.eapol,
+            rtnl: self.rtnl.as_mut(),
+            dhcp: &mut self.dhcp,
             timers: &mut self.timers,
             server: &mut self.ipc,
             now: Instant::now(),
