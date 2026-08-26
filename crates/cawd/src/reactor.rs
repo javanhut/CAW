@@ -471,7 +471,7 @@ impl Reactor {
                 self.ipc.send(id, Response::Status(status));
             }
             Request::Connect { ssid, port } => {
-                let ifindex = match self.wireless_ifindex(port.as_deref()) {
+                let ifindex = match self.wireless_ifindex_up(port.as_deref()) {
                     Ok(ifindex) => ifindex,
                     Err(e) => {
                         self.ipc.send(id, Response::error(e));
@@ -597,7 +597,7 @@ impl Reactor {
     }
 
     fn start_scan(&mut self, client: ClientId, port: Option<&str>) -> Result<(), String> {
-        let ifindex = self.wireless_ifindex(port)?;
+        let (ifindex, name) = self.wireless_interface(port)?;
         let wireless = self.wireless.as_mut().ok_or(NO_WIRELESS)?;
         match wireless.nl.trigger_scan(ifindex, &[]) {
             Ok(()) => {}
@@ -605,6 +605,12 @@ impl Reactor {
             // request just as well: the results land in the same cache and the
             // same notification announces them.
             Err(caw_nl80211::Error::Netlink(caw_netlink::Error::Kernel(16))) => {}
+            // ENETDOWN. A scan needs no privilege, so it does not raise the
+            // link the way `connect` does; it names the port that is down and
+            // what raises it.
+            Err(caw_nl80211::Error::Netlink(caw_netlink::Error::Kernel(100))) => {
+                return Err(format!("{name} is down (caw port up {name})"));
+            }
             Err(e) => return Err(e.to_string()),
         }
 
@@ -709,8 +715,7 @@ impl Reactor {
     /// and nothing has run `caw port up` — an autoconnect that refused to
     /// touch the link would have nothing to scan with.
     fn begin_autoconnect(&mut self) -> Result<(), String> {
-        let ifindex = self.wireless_ifindex(None)?;
-        self.set_link_up(ifindex, true)?;
+        let ifindex = self.wireless_ifindex_up(None)?;
         self.with_engine(|engine, ports| engine.autoconnect(ifindex, ports))
     }
 
@@ -720,12 +725,12 @@ impl Reactor {
         rtnl.set_up(ifindex, up).map_err(|e| e.to_string())
     }
 
-    /// The interface a wireless request applies to.
+    /// The interface a wireless request applies to, as index and name.
     ///
     /// With no port named, the single station-mode interface is the obvious
     /// answer, and refusing to guess between several is better than picking
     /// the wrong radio.
-    fn wireless_ifindex(&mut self, port: Option<&str>) -> Result<u32, String> {
+    fn wireless_interface(&mut self, port: Option<&str>) -> Result<(u32, String), String> {
         let wireless = self.wireless.as_mut().ok_or(NO_WIRELESS)?;
         let interfaces = wireless.nl.interfaces().map_err(|e| e.to_string())?;
 
@@ -733,16 +738,31 @@ impl Reactor {
             return interfaces
                 .iter()
                 .find(|i| i.name == name)
-                .map(|i| i.ifindex)
+                .map(|i| (i.ifindex, i.name.clone()))
                 .ok_or_else(|| format!("{name} is not a wireless port"));
         }
 
         let mut stations = interfaces.iter().filter(|i| i.iftype == IfType::Station);
         match (stations.next(), stations.next()) {
-            (Some(only), None) => Ok(only.ifindex),
+            (Some(only), None) => Ok((only.ifindex, only.name.clone())),
             (None, _) => Err("no wireless port".to_owned()),
             (Some(_), Some(_)) => Err("several wireless ports; name one".to_owned()),
         }
+    }
+
+    /// The interface a wireless request applies to, brought up.
+    ///
+    /// Connecting needs the link administratively up -- nl80211 answers
+    /// ENETDOWN to everything else -- and on a machine that has just booted
+    /// nothing has raised it. Raising a link that is already up is a no-op,
+    /// so this is done on every request rather than by guessing at the
+    /// state. The error names the port: a driver that refuses to open is the
+    /// interesting failure here, and an errno on its own is not.
+    fn wireless_ifindex_up(&mut self, port: Option<&str>) -> Result<u32, String> {
+        let (ifindex, name) = self.wireless_interface(port)?;
+        self.set_link_up(ifindex, true)
+            .map_err(|e| format!("could not bring {name} up: {e}"))?;
+        Ok(ifindex)
     }
 
     /// Tear down before exiting, so the AP sees a station leaving rather than

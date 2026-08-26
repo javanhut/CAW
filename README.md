@@ -88,6 +88,10 @@ caw scan
 caw connect ExampleNetworkName # runs an interactive setup for this network
 ```
 
+`connect` brings the port up itself, so there is no `caw port up` to run
+first. `scan` does not — it needs no privileges, so it cannot — and says which
+port is down if it finds one.
+
 ### Disconnect from a wireless network
 
 ```bash

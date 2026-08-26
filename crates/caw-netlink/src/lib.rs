@@ -340,7 +340,13 @@ impl std::fmt::Display for Error {
             Error::ShortSend => write!(f, "short netlink send"),
             Error::Overrun => write!(f, "netlink message exceeded the receive buffer"),
             Error::Kernel(1) => write!(f, "operation not permitted (try running as root)"),
-            Error::Kernel(errno) => write!(f, "kernel returned errno {errno}"),
+            // The libc text for the number, because "errno 100" sends the
+            // reader to a header file and "Network is down" does not.
+            Error::Kernel(errno) => write!(
+                f,
+                "kernel returned {}",
+                rustix::io::Errno::from_raw_os_error(*errno)
+            ),
         }
     }
 }
