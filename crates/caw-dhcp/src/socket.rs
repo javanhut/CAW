@@ -22,6 +22,15 @@
 //! route for `255.255.255.255` on the target link before starting the
 //! exchange — the same trick other DHCP clients use — and on a machine with
 //! several links, must not run two exchanges at once.
+//!
+//! The same absence costs something on the way back. A packet socket would
+//! see the OFFER before the IP layer judged it; a UDP socket sees it only
+//! after, and the IP layer runs reverse-path filtering (`rp_filter`) on
+//! broadcasts too. With no address and so no route to the server, the OFFER
+//! is a martian and is dropped. So the caller must also make the server
+//! reachable in advance — a link-scope default route out the target link,
+//! which is what `caw_rtnl::Rtnl::add_dhcp_probe_route` installs — and take
+//! it away once the exchange is over.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};

@@ -57,6 +57,11 @@ pub struct Ports<'a> {
 pub struct DhcpRun {
     pub socket: Dhcp4Socket,
     pub machine: Dhcp4,
+    /// The interface the exchange runs on, so the probe route can be taken
+    /// off it again without asking the engine which link that was.
+    pub ifindex: u32,
+    /// Whether `Rtnl::add_dhcp_probe_route` succeeded and has not been undone.
+    pub probe_route: bool,
 }
 
 impl Ports<'_> {
@@ -252,6 +257,11 @@ impl Engine {
 
     pub fn on_dhcp_timer(&mut self, timer: caw_dhcp::Timer, ports: &mut Ports<'_>) {
         if let Some(event) = Self::drive_dhcp(ports, caw_dhcp::Input::Timeout(timer)) {
+            // An exchange that gave up has no socket worth polling and no
+            // probe route worth keeping; a retry starts a fresh one.
+            if matches!(event, LeaseEvent::Failed) {
+                Self::stop_dhcp(ports);
+            }
             self.feed(Input::Lease(event), ports);
         }
     }
@@ -456,14 +466,25 @@ impl Engine {
                 let ifindex = self.ifindex().ok_or("no interface for DHCP")?;
                 let mac = self.device.map(|d| d.mac).ok_or("no device MAC for DHCP")?;
 
-                // 255.255.255.255 needs a route before the interface has an
-                // address; see `Rtnl::add_broadcast_route`. Best-effort: on a
-                // machine that already carries the route this is a no-op, and
-                // on one where rtnetlink is gone the DISCOVER send will say so.
-                if let Some(rtnl) = ports.rtnl.as_mut()
-                    && let Err(e) = rtnl.add_broadcast_route(ifindex)
-                {
-                    log::warn(format_args!("dhcp: broadcast route: {e}"));
+                // A restart mid-exchange must not leave the old run's probe
+                // route behind untracked.
+                Self::stop_dhcp(ports);
+
+                // Two routes before the interface has an address; see
+                // `Rtnl::add_broadcast_route` and `Rtnl::add_dhcp_probe_route`.
+                // The first gets the DISCOVER out, the second lets the OFFER
+                // back in past reverse-path filtering. Both best-effort: on a
+                // machine that already carries them this is a no-op, and on
+                // one where rtnetlink is gone the DISCOVER send will say so.
+                let mut probe_route = false;
+                if let Some(rtnl) = ports.rtnl.as_mut() {
+                    if let Err(e) = rtnl.add_broadcast_route(ifindex) {
+                        log::warn(format_args!("dhcp: broadcast route: {e}"));
+                    }
+                    match rtnl.add_dhcp_probe_route(ifindex) {
+                        Ok(()) => probe_route = true,
+                        Err(e) => log::warn(format_args!("dhcp: probe route: {e}")),
+                    }
                 }
 
                 let socket = Dhcp4Socket::open().map_err(|e| {
@@ -477,7 +498,12 @@ impl Engine {
                         machine = machine.with_hostname(hostname);
                     }
                 }
-                *ports.dhcp = Some(DhcpRun { socket, machine });
+                *ports.dhcp = Some(DhcpRun {
+                    socket,
+                    machine,
+                    ifindex,
+                    probe_route,
+                });
 
                 if let Some(event) = Self::drive_dhcp(ports, caw_dhcp::Input::Start(xid)) {
                     return Ok(Some(Input::Lease(event)));
@@ -491,13 +517,14 @@ impl Engine {
                     .as_mut()
                     .ok_or("no rtnetlink socket to apply the lease")?;
                 rtnl.add_address(ifindex, lease.addr, lease.prefix_len)
-                    .map_err(|e| {
-                        format!("cannot add {}/{}: {e}", lease.addr, lease.prefix_len)
-                    })?;
+                    .map_err(|e| format!("cannot add {}/{}: {e}", lease.addr, lease.prefix_len))?;
                 if let Some(gateway) = lease.gateway {
                     rtnl.add_default_route(ifindex, gateway)
                         .map_err(|e| format!("cannot add the default route via {gateway}: {e}"))?;
                 }
+                // The lease has routes of its own now; the probe route that
+                // let its OFFER in has done its job.
+                Self::drop_probe_route(ports.dhcp, rtnl);
                 // The resolver is a file, not a netlink object, and a lease
                 // without working DNS looks exactly like no connection at
                 // all. Failure to write it is worth a line, not the lease.
@@ -632,15 +659,20 @@ impl Engine {
                     }
                 }
                 caw_dhcp::Action::SetTimer { timer, secs } => {
-                    ports
-                        .timers
-                        .arm(Key::Dhcp(timer), Duration::from_secs(secs.into()), ports.now);
+                    ports.timers.arm(
+                        Key::Dhcp(timer),
+                        Duration::from_secs(secs.into()),
+                        ports.now,
+                    );
                 }
                 caw_dhcp::Action::Configured(lease) => {
                     out = Some(LeaseEvent::Acquired(lease));
                 }
                 caw_dhcp::Action::Deconfigure(reason) => {
                     out = Some(LeaseEvent::Lost(reason));
+                }
+                caw_dhcp::Action::Failed => {
+                    out = Some(LeaseEvent::Failed);
                 }
             }
         }
@@ -650,9 +682,31 @@ impl Engine {
     /// End any DHCP exchange and disarm its timers.
     fn stop_dhcp(ports: &mut Ports<'_>) {
         use caw_dhcp::Timer;
+        if let Some(rtnl) = ports.rtnl.as_mut() {
+            Self::drop_probe_route(ports.dhcp, rtnl);
+        }
         *ports.dhcp = None;
-        for timer in [Timer::Retransmit, Timer::Renew, Timer::Rebind, Timer::Expire] {
+        for timer in [
+            Timer::Retransmit,
+            Timer::Renew,
+            Timer::Rebind,
+            Timer::Expire,
+        ] {
             ports.timers.cancel(Key::Dhcp(timer));
+        }
+    }
+
+    /// Take the probe route off the exchange's interface, once. Failure is a
+    /// line in the log: a stray high-metric route is untidy, not harmful, and
+    /// nothing that depends on it is still running.
+    fn drop_probe_route(dhcp: &mut Option<DhcpRun>, rtnl: &mut Rtnl) {
+        if let Some(run) = dhcp
+            && run.probe_route
+        {
+            run.probe_route = false;
+            if let Err(e) = rtnl.del_dhcp_probe_route(run.ifindex) {
+                log::warn(format_args!("dhcp: removing the probe route: {e}"));
+            }
         }
     }
 

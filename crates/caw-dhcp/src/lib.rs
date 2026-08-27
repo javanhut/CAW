@@ -24,7 +24,7 @@ mod socket;
 
 use std::net::Ipv4Addr;
 
-pub use client::{Action, Dhcp4, Input, Lease, Reason, State, Timer};
+pub use client::{Action, Dhcp4, Input, Lease, MAX_TRIES, Reason, State, Timer};
 pub use ipv6::{PrefixInfo, ROUTER_ADVERTISEMENT, RouterAdvert, eui64_interface_id, slaac_address};
 pub use message::{BOOTREPLY, BOOTREQUEST, FLAG_BROADCAST, MAGIC_COOKIE, Message};
 // The option codes are part of the surface because [`Message::get`] takes one.

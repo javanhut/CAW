@@ -27,6 +27,8 @@ fn main() {
 
     rtnl.add_broadcast_route(link.index)
         .expect("broadcast route");
+    // Without this the OFFER is a martian under rp_filter and never arrives.
+    rtnl.add_dhcp_probe_route(link.index).expect("probe route");
 
     let socket = Dhcp4Socket::open().expect("socket (needs root for port 68)");
     let xid = new_xid().expect("xid");
@@ -42,7 +44,10 @@ fn main() {
             match action {
                 Action::Broadcast(data) => socket.send_broadcast(&data).expect("broadcast"),
                 Action::Unicast { to, data } => socket.send_to(to, &data).expect("unicast"),
-                Action::SetTimer { timer: Timer::Retransmit, secs } => {
+                Action::SetTimer {
+                    timer: Timer::Retransmit,
+                    secs,
+                } => {
                     retransmit_at = Some(Instant::now() + Duration::from_secs(secs.into()));
                 }
                 // Renew/rebind/expiry are hours away; not this test's business.
@@ -55,19 +60,27 @@ fn main() {
                     rtnl.add_address(link.index, lease.addr, lease.prefix_len)
                         .expect("add_address");
                     if let Some(gw) = lease.gateway {
-                        rtnl.add_default_route(link.index, gw).expect("add_default_route");
+                        rtnl.add_default_route(link.index, gw)
+                            .expect("add_default_route");
                     }
+                    rtnl.del_dhcp_probe_route(link.index)
+                        .expect("del_dhcp_probe_route");
                     // Read it back: the kernel, not this program, is the judge.
-                    let ok = rtnl
-                        .addresses()
-                        .expect("addresses")
-                        .iter()
-                        .any(|a| a.index == link.index && a.addr == std::net::IpAddr::V4(lease.addr));
-                    assert!(ok, "the kernel does not show the address that was just added");
+                    let ok = rtnl.addresses().expect("addresses").iter().any(|a| {
+                        a.index == link.index && a.addr == std::net::IpAddr::V4(lease.addr)
+                    });
+                    assert!(
+                        ok,
+                        "the kernel does not show the address that was just added"
+                    );
                     println!("verified: address is on the interface");
                     std::process::exit(0);
                 }
                 Action::Deconfigure(reason) => panic!("deconfigured: {reason:?}"),
+                Action::Failed => {
+                    eprintln!("no server answered {} tries", caw_dhcp::MAX_TRIES);
+                    std::process::exit(1);
+                }
             }
         }
 

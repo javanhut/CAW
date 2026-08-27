@@ -27,12 +27,20 @@ StateDirectoryMode=0700
 UMask=0077
 
 # CAP_NET_ADMIN for netlink and key installation, CAP_NET_RAW for the EAPOL
-# packet socket. Nothing else is needed.
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# packet socket, CAP_NET_BIND_SERVICE for the DHCP client's port 68. Nothing
+# else is needed. The bounding set applies to root as well, so a capability
+# missing here is missing for good: without CAP_NET_BIND_SERVICE the DHCP
+# bind fails and every connection ends at "configuring addresses".
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 
 ProtectSystem=strict
+# A lease's DNS servers go into /etc/resolv.conf, written as a temporary file
+# in /etc and renamed over the top. `strict` makes /etc read-only, and a
+# ReadWritePaths= on the file alone would not do: rename() onto a bind mount
+# fails with EBUSY, and the temporary file does not exist to be mounted.
+ReadWritePaths=/etc
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

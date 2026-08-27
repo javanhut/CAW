@@ -41,6 +41,14 @@ const PARAM_REQUEST: [u8; 6] = [
 /// so a short lease cannot turn into a busy loop.
 const MIN_RENEW_INTERVAL: u32 = 60;
 
+/// How many times a DISCOVER or a selecting REQUEST is sent before the
+/// exchange is given up as unanswered. With the §4.1 backoff below that is
+/// about a minute — 4 + 8 + 16 + 32 seconds — which is how long a person
+/// watching "configuring addresses" can be asked to wait before being told
+/// nothing is answering. Renewal and rebinding have no such cap: they are
+/// bounded by the lease timers instead.
+pub const MAX_TRIES: u32 = 4;
+
 /// A configured address and everything that comes with it.
 ///
 /// The timers are durations from the moment the lease was granted, not wall
@@ -198,6 +206,10 @@ pub enum Action {
     Configured(Lease),
     /// Take the configuration back off; the address is no longer valid.
     Deconfigure(Reason),
+    /// No server answered [`MAX_TRIES`] transmissions. The exchange is over
+    /// and the machine is back in [`State::Init`]; nothing was configured, so
+    /// there is nothing to take off.
+    Failed,
 }
 
 /// One DHCPv4 exchange on one interface.
@@ -363,6 +375,14 @@ impl Dhcp4 {
 
     fn retransmit(&mut self) -> Vec<Action> {
         match self.state {
+            // The retransmission that would be the (MAX_TRIES + 1)th send is
+            // the point of giving up: `tries` counts the sends already made.
+            State::Selecting | State::Requesting if self.tries + 1 >= MAX_TRIES => {
+                self.state = State::Init;
+                self.server = None;
+                self.offered = Ipv4Addr::UNSPECIFIED;
+                vec![Action::Failed]
+            }
             State::Selecting => {
                 self.age();
                 self.broadcast(self.discover())
@@ -741,9 +761,44 @@ mod tests {
         };
 
         expect(&client.poll(Input::Start(CAPTURE_XID)), 0);
-        for attempt in 1..7 {
+        for attempt in 1..MAX_TRIES {
             expect(&client.poll(Input::Timeout(Timer::Retransmit)), attempt);
         }
+    }
+
+    #[test]
+    fn gives_up_when_nothing_answers() {
+        // Selecting: MAX_TRIES DISCOVERs go out, then the exchange ends
+        // without a send, without a timer and without a lease.
+        let mut client = Dhcp4::new(CAPTURE_MAC, CAPTURE_XID);
+        client.poll(Input::Start(CAPTURE_XID));
+        for _ in 1..MAX_TRIES {
+            let actions = client.poll(Input::Timeout(Timer::Retransmit));
+            assert!(matches!(actions[0], Action::Broadcast(_)));
+        }
+        let actions = client.poll(Input::Timeout(Timer::Retransmit));
+        assert_eq!(actions, vec![Action::Failed]);
+        assert_eq!(client.state(), State::Init);
+        assert!(client.lease().is_none());
+        // Init ignores a stale timer rather than sending again.
+        assert!(client.poll(Input::Timeout(Timer::Retransmit)).is_empty());
+
+        // Requesting: an offer that is never acknowledged ends the same way,
+        // and the count restarts at the offer.
+        let mut client = Dhcp4::new(CAPTURE_MAC, CAPTURE_XID);
+        client.poll(Input::Start(CAPTURE_XID));
+        client.poll(Input::Timeout(Timer::Retransmit));
+        client.poll(Input::Datagram(&offer(CAPTURE_XID)));
+        assert_eq!(client.state(), State::Requesting);
+        for _ in 1..MAX_TRIES {
+            let actions = client.poll(Input::Timeout(Timer::Retransmit));
+            assert_eq!(sent(&actions).message_type(), Some(MessageType::Request));
+        }
+        assert_eq!(
+            client.poll(Input::Timeout(Timer::Retransmit)),
+            vec![Action::Failed]
+        );
+        assert_eq!(client.state(), State::Init);
     }
 
     #[test]
