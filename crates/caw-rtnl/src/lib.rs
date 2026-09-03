@@ -14,6 +14,7 @@ use caw_netlink::{
 const RTM_NEWLINK: u16 = 16;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
+const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
 const RTM_NEWROUTE: u16 = 24;
 const RTM_DELROUTE: u16 = 25;
@@ -301,6 +302,21 @@ impl Rtnl {
         .attr(IFA_ADDRESS, &addr.octets())
         .attr(IFA_BROADCAST, &brd.octets())
         .finish();
+        self.sock.request(&req, |_| Ok(()))
+    }
+
+    /// Remove one IPv4 address from a link.
+    ///
+    /// DHCP can hand out a different address after a reconnect. Deleting the
+    /// previous lease keeps it from remaining as a secondary address and
+    /// being selected as the source of later traffic.
+    pub fn del_address(&mut self, index: u32, addr: Ipv4Addr, prefix_len: u8) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let req = MsgBuilder::new(RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK, seq)
+            .header(&ifaddrmsg(AF_INET, prefix_len, index))
+            .attr(IFA_LOCAL, &addr.octets())
+            .attr(IFA_ADDRESS, &addr.octets())
+            .finish();
         self.sock.request(&req, |_| Ok(()))
     }
 

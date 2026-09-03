@@ -20,6 +20,7 @@
 //!     `caw_nl80211::Connect` has no field for either.
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -516,6 +517,30 @@ impl Engine {
                     .rtnl
                     .as_mut()
                     .ok_or("no rtnetlink socket to apply the lease")?;
+
+                // A reconnect may receive a different address. This daemon
+                // owns address configuration on its wireless interface, so
+                // remove earlier IPv4 leases before installing the current
+                // one. Otherwise every reconnect leaves another secondary
+                // address behind and the kernel may source traffic from a
+                // lease the DHCP server has already reassigned.
+                let addresses = rtnl
+                    .addresses()
+                    .map_err(|e| format!("cannot list addresses before applying DHCP: {e}"))?;
+                for address in addresses {
+                    let IpAddr::V4(addr) = address.addr else {
+                        continue;
+                    };
+                    if address.index == ifindex
+                        && addr != lease.addr
+                        && let Err(e) = rtnl.del_address(ifindex, addr, address.prefix_len)
+                    {
+                        log::warn(format_args!(
+                            "dhcp: cannot remove stale {addr}/{}: {e}",
+                            address.prefix_len
+                        ));
+                    }
+                }
                 rtnl.add_address(ifindex, lease.addr, lease.prefix_len)
                     .map_err(|e| format!("cannot add {}/{}: {e}", lease.addr, lease.prefix_len))?;
                 if let Some(gateway) = lease.gateway {
