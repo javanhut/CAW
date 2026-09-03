@@ -171,6 +171,29 @@ pub fn disconnect(family: u16, seq: u32, ifindex: u32, reason: u16) -> Vec<u8> {
         .finish()
 }
 
+/// Switch 802.11 power saving on or off for one station interface.
+///
+/// This is the station's own dozing between beacons, not the PCI device's
+/// power state: with it on, mac80211 tells the AP to buffer frames and lets
+/// the driver sleep the radio in between. Whether the driver then wakes up
+/// again is up to its firmware, and on some it is not reliably — see
+/// `cawd`, which turns it off for exactly that reason.
+///
+/// The setting lives on the interface and survives it going down and up, but
+/// not the driver being reloaded.
+pub fn set_power_save(family: u16, seq: u32, ifindex: u32, enabled: bool) -> Vec<u8> {
+    let state = if enabled {
+        NL80211_PS_ENABLED
+    } else {
+        NL80211_PS_DISABLED
+    };
+    MsgBuilder::new(family, NLM_F_REQUEST | NLM_F_ACK, seq)
+        .header(&genlmsghdr(NL80211_CMD_SET_POWER_SAVE, 0))
+        .attr_u32(NL80211_ATTR_IFINDEX, ifindex)
+        .attr_u32(NL80211_ATTR_PS_STATE, state)
+        .finish()
+}
+
 /// Install the pairwise key derived by the 4-way handshake.
 ///
 /// Index 0 is the only one a station uses for a PTK. The peer address is what

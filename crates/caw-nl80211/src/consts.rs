@@ -33,6 +33,7 @@ pub const NL80211_CMD_SCAN_ABORTED: u8 = 35;
 pub const NL80211_CMD_CONNECT: u8 = 46;
 pub const NL80211_CMD_DISCONNECT: u8 = 48;
 pub const NL80211_CMD_FRAME: u8 = 59;
+pub const NL80211_CMD_SET_POWER_SAVE: u8 = 61;
 pub const NL80211_CMD_EXTERNAL_AUTH: u8 = 127;
 
 // nl80211 attributes.
@@ -66,6 +67,7 @@ pub const NL80211_ATTR_CIPHER_SUITES_PAIRWISE: u16 = 73;
 pub const NL80211_ATTR_CIPHER_SUITE_GROUP: u16 = 74;
 pub const NL80211_ATTR_WPA_VERSIONS: u16 = 75;
 pub const NL80211_ATTR_AKM_SUITES: u16 = 76;
+pub const NL80211_ATTR_PS_STATE: u16 = 93;
 pub const NL80211_ATTR_KEY_DEFAULT_TYPES: u16 = 110;
 pub const NL80211_ATTR_SPLIT_WIPHY_DUMP: u16 = 174;
 pub const NL80211_ATTR_EXT_FEATURES: u16 = 217;
@@ -116,6 +118,10 @@ pub const NL80211_AUTHTYPE_SAE: u32 = 4;
 pub const NL80211_MFP_NO: u32 = 0;
 pub const NL80211_MFP_REQUIRED: u32 = 1;
 pub const NL80211_MFP_OPTIONAL: u32 = 2;
+
+// `enum nl80211_ps_state`, the value of NL80211_ATTR_PS_STATE.
+pub const NL80211_PS_DISABLED: u32 = 0;
+pub const NL80211_PS_ENABLED: u32 = 1;
 
 // `enum nl80211_external_auth_action`.
 pub const NL80211_EXTERNAL_AUTH_START: u32 = 0;

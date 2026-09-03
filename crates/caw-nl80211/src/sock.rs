@@ -143,6 +143,18 @@ impl Nl80211 {
         Ok(())
     }
 
+    /// Switch the station's 802.11 power saving on or off. See
+    /// [`msg::set_power_save`] for what that does and does not cover.
+    ///
+    /// `EOPNOTSUPP` from the kernel means the driver offers no control over
+    /// it, which is the case for an interface that is not a station.
+    pub fn set_power_save(&mut self, ifindex: u32, enabled: bool) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let req = msg::set_power_save(self.family.id, seq, ifindex, enabled);
+        self.sock.request(&req, |_| Ok(()))?;
+        Ok(())
+    }
+
     /// Install the pairwise key from a completed 4-way handshake.
     pub fn new_pairwise_key(
         &mut self,

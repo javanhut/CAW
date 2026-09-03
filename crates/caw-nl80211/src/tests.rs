@@ -609,6 +609,30 @@ fn disconnect_reason_is_sixteen_bits() {
 }
 
 #[test]
+fn power_save_is_a_u32_state_on_the_interface() {
+    let bytes = msg::set_power_save(28, 1, 7, false);
+    assert_eq!(msg_kind(&bytes), 28);
+    let payload = built_body(&bytes);
+    assert_eq!(payload[0], NL80211_CMD_SET_POWER_SAVE);
+
+    let attrs: Vec<_> = Attrs::of_body(payload).collect();
+    assert_eq!(attrs.len(), 2);
+    assert_eq!(attrs[0].kind, NL80211_ATTR_IFINDEX);
+    assert_eq!(attrs[0].u32(), Some(7));
+    assert_eq!(attrs[1].kind, NL80211_ATTR_PS_STATE);
+    // The kernel rejects anything but the two enum values, so a bool must
+    // not be sent as a flag or a u8.
+    assert_eq!(attrs[1].payload.len(), 4);
+    assert_eq!(attrs[1].u32(), Some(NL80211_PS_DISABLED));
+
+    let on = msg::set_power_save(28, 2, 7, true);
+    let state = Attrs::of_body(built_body(&on))
+        .find(NL80211_ATTR_PS_STATE)
+        .unwrap();
+    assert_eq!(state.u32(), Some(NL80211_PS_ENABLED));
+}
+
+#[test]
 fn events_decode_from_their_command() {
     let scan = body(
         NL80211_CMD_NEW_SCAN_RESULTS,

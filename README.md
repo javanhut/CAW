@@ -92,6 +92,11 @@ caw connect ExampleNetworkName # runs an interactive setup for this network
 first. `scan` does not — it needs no privileges, so it cannot — and says which
 port is down if it finds one.
 
+Whenever the daemon raises a wireless port it also switches the station's
+802.11 power saving off. Some drivers' firmware never wakes the radio back up
+once it has dozed (Realtek's rtw88 on the RTL8821CE is the known case), and a
+link that stays up is worth more than the battery that dozing would save.
+
 ### Disconnect from a wireless network
 
 ```bash

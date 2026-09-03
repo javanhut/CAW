@@ -93,6 +93,10 @@ enum Source {
 struct Wireless {
     nl: Nl80211,
     events: Events,
+    /// Interfaces whose power saving has been switched off, with whether the
+    /// last attempt succeeded, so the outcome is logged when it changes and
+    /// not on every autoconnect tick.
+    power_save_off: Vec<(u32, bool)>,
 }
 
 /// A scan a client is waiting for the kernel to finish.
@@ -135,7 +139,11 @@ impl Reactor {
 
         let wireless = match Nl80211::open() {
             Ok(nl) => match nl.events() {
-                Ok(events) => Some(Wireless { nl, events }),
+                Ok(events) => Some(Wireless {
+                    nl,
+                    events,
+                    power_save_off: Vec::new(),
+                }),
                 Err(e) => {
                     log::warn(format_args!("no wireless events: {e}"));
                     None
@@ -556,7 +564,11 @@ impl Reactor {
             .link_by_name(name)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no such port: {name}"))?;
-        self.set_link_up(link.index, up)
+        self.set_link_up(link.index, up)?;
+        if up && link.kind == Kind::Wireless {
+            self.disable_power_save(link.index, name);
+        }
+        Ok(())
     }
 
     fn status(&mut self) -> ConnectionStatus {
@@ -762,7 +774,61 @@ impl Reactor {
         let (ifindex, name) = self.wireless_interface(port)?;
         self.set_link_up(ifindex, true)
             .map_err(|e| format!("could not bring {name} up: {e}"))?;
+        self.disable_power_save(ifindex, &name);
         Ok(ifindex)
+    }
+
+    /// Switch off 802.11 power saving on a wireless port cawd has just
+    /// raised.
+    ///
+    /// The kernel turns it on by default, and on some drivers the firmware
+    /// that is supposed to wake the radio for the next beacon does not: the
+    /// Realtek rtw88 family on the RTL8821CE logs "firmware failed to leave
+    /// lps state" every two seconds from then on, drops its command path,
+    /// and eventually the association. A station that never dozes never has
+    /// to wake up. The cost is some battery on hardware that does not need
+    /// this, which is a price worth paying for a link that stays up.
+    ///
+    /// Done every time the port is raised rather than once, because the
+    /// setting does not outlive a driver reload and raising an already-up
+    /// port is where a reloaded driver first shows up. Never fatal: a driver
+    /// that offers no control over it (EOPNOTSUPP) is a driver that does not
+    /// have this problem, and the connection goes ahead either way.
+    fn disable_power_save(&mut self, ifindex: u32, name: &str) {
+        let Some(wireless) = &mut self.wireless else {
+            return;
+        };
+        let ok = match wireless.nl.set_power_save(ifindex, false) {
+            Ok(()) => true,
+            Err(e) => {
+                if wireless
+                    .power_save_off
+                    .iter()
+                    .all(|&(i, ok)| i != ifindex || ok)
+                {
+                    log::warn(format_args!("{name}: could not switch power save off: {e}"));
+                }
+                false
+            }
+        };
+        match wireless
+            .power_save_off
+            .iter_mut()
+            .find(|(i, _)| *i == ifindex)
+        {
+            Some(entry) => {
+                if ok && !entry.1 {
+                    log::info(format_args!("{name}: power save off"));
+                }
+                entry.1 = ok;
+            }
+            None => {
+                if ok {
+                    log::info(format_args!("{name}: power save off"));
+                }
+                wireless.power_save_off.push((ifindex, ok));
+            }
+        }
     }
 
     /// Tear down before exiting, so the AP sees a station leaving rather than

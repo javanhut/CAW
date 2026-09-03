@@ -132,7 +132,7 @@ Layering is enforced by the compiler: dependency edges only point downward.
 | `caw-netlink` | `AF_NETLINK` sockets, `nlmsghdr`/`nlattr` codec, dump handling |
 | `caw-rtnl` | links, addresses, routes |
 | `caw-80211` | 802.11 frame and IE parsing — RSN IE, SSID, ciphers, AKMs |
-| `caw-nl80211` | wiphy enumeration, scan, associate, key install, external auth |
+| `caw-nl80211` | wiphy enumeration, scan, associate, key install, power save, external auth |
 | `caw-crypto` | PMK/PTK derivation, MIC, key wrap, SAE |
 | `caw-eapol` | `AF_PACKET` transport, 4-way handshake, EAP methods |
 | `caw-dhcp` | DHCPv4, DHCPv6, SLAAC |
