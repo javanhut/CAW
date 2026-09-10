@@ -9,9 +9,10 @@
 //! Clearing `ECHO` alone leaves `ISIG` set, so Ctrl-C at the prompt raises
 //! `SIGINT`, whose default disposition kills the process before any destructor
 //! runs — and the terminal is left with echo off, which looks to the user like
-//! their shell has broken. Installing a signal handler instead is not
-//! available here: `sigaction` is `unsafe`, rustix exposes no `signalfd`, and
-//! this crate is `#![forbid(unsafe_code)]`.
+//! their shell has broken. A signal handler could catch that (`cawd` installs
+//! one through `signal-hook`), but a handler may only set a flag or write to
+//! a pipe, and restoring a terminal from inside one is not on the list; the
+//! prompt would still have to notice the flag between reads.
 //!
 //! So `ISIG` and `ICANON` come off too and the interrupt character is read as
 //! an ordinary byte. That costs the kernel's line editing, which is why the

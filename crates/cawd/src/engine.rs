@@ -34,6 +34,7 @@ use caw_nl80211::{Connect, KeyScope, Nl80211};
 use caw_rtnl::{Rtnl, format_mac};
 
 use crate::ipc::{ClientId, Server};
+use crate::links::LinkEvent;
 use crate::log;
 use crate::reactor::Key;
 use crate::timers::Timers;
@@ -84,6 +85,18 @@ const MAX_TURNS: usize = 32;
 
 const NO_WIRELESS: &str = "no wireless stack: the kernel has no nl80211 family";
 
+/// Where a lease's DNS servers are written. `/etc/resolv.conf` is expected to
+/// be a symlink to it, the way systemd-resolved is used; the daemon says so
+/// when it is not.
+///
+/// Under `/run/caw` rather than `/etc` because the unit runs with
+/// `ProtectSystem=strict`, and an atomic replace of `/etc/resolv.conf` needs
+/// write access to the whole of `/etc` — `rename()` onto a bind-mounted file
+/// fails with `EBUSY`, and the temporary file does not exist to be mounted.
+/// Opening `/etc` to a `CAP_NET_ADMIN` process undoes most of the hardening;
+/// a symlink costs one command at install time.
+pub const RESOLV_CONF: &str = "/run/caw/resolv.conf";
+
 pub struct Engine {
     core: Option<Connection>,
     device: Option<Device>,
@@ -95,6 +108,9 @@ pub struct Engine {
     pending_secret: Option<PendingSecret>,
     next_token: u64,
     profile_dir: PathBuf,
+    /// Whether the missing `/etc/resolv.conf` symlink has been reported, so
+    /// it is said once and not on every renewal.
+    resolver_warned: bool,
 }
 
 struct PendingSecret {
@@ -117,6 +133,7 @@ impl Engine {
             pending_secret: None,
             next_token: 1,
             profile_dir: PathBuf::from(profile::DEFAULT_DIR),
+            resolver_warned: false,
         }
     }
 
@@ -207,7 +224,19 @@ impl Engine {
             Some(current) => return Err(format!("connected to {current}, not {ssid}")),
             None => return Err("not connected".to_owned()),
         }
-        self.watcher = Some(client);
+        // A `caw connect` still in progress is ended by this, and its client
+        // is told so — the `Ok` that closes the disconnect goes to whoever
+        // asked for the disconnect, and the other client would otherwise
+        // wait for a response that never comes.
+        if let Some(previous) = self.watcher.replace(client)
+            && previous != client
+        {
+            ports.server.send(
+                previous,
+                Response::error("superseded by a disconnect request"),
+            );
+        }
+        self.pending_secret = None;
         self.feed(Input::Command(Command::Disconnect), ports);
         Ok(())
     }
@@ -271,6 +300,45 @@ impl Engine {
         self.feed(Input::Timer(id), ports);
     }
 
+    /// An rtnetlink notification, which matters when it is about the
+    /// interface the connection runs on.
+    ///
+    /// nl80211 usually reports a disconnection when an interface goes down,
+    /// but not on every driver and not for every state — a station that was
+    /// scanning or associating when the link was pulled from under it may
+    /// hear nothing at all. rtnetlink always says when a link goes down or
+    /// away, so this is the report that can be relied on; where both arrive,
+    /// whichever is first ends the connection and the second finds it idle.
+    ///
+    /// Carrier is left alone on purpose: it is absent throughout association
+    /// and comes back with the keys, and the AP-side loss it also signals
+    /// arrives as a deauthentication that `caw-core` reconnects from.
+    pub fn on_link(&mut self, event: LinkEvent, ports: &mut Ports<'_>) {
+        let Some(ifindex) = self.ifindex() else {
+            return;
+        };
+        match event {
+            LinkEvent::Removed { ifindex: gone } if gone == ifindex => {
+                self.abort(format!("ifindex {ifindex} was removed"), ports);
+                // The state machine was built from this interface's address
+                // and capabilities, and whatever appears next under the same
+                // index — a dongle plugged back in, a reloaded driver — is not
+                // necessarily the same device. The next command describes it
+                // afresh.
+                self.core = None;
+                self.device = None;
+            }
+            LinkEvent::Changed {
+                ifindex: changed,
+                up: false,
+                ..
+            } if changed == ifindex && !self.is_idle() => {
+                self.abort(format!("ifindex {ifindex} was taken down"), ports);
+            }
+            _ => {}
+        }
+    }
+
     /// A client disconnected; stop streaming to it.
     ///
     /// The connection itself carries on: `caw connect` exiting after the link
@@ -297,6 +365,21 @@ impl Engine {
     fn prepare(&mut self, ifindex: u32, ports: &mut Ports<'_>) -> Result<(), String> {
         let device = self.describe(ifindex, ports)?;
         if self.device != Some(device) {
+            // A different address or capability set is a different device
+            // as far as key derivation is concerned, so the state machine is
+            // built again — and a connection the old one had in flight is
+            // ended first, not silently dropped with the kernel still
+            // associated and a client still waiting.
+            if !self.is_idle() {
+                self.abort(
+                    format!("the address or capabilities of ifindex {ifindex} changed"),
+                    ports,
+                );
+            }
+            // Whatever the old machine armed would fire into the new one
+            // under the same ids: a stale association timeout, landing while
+            // the new attempt is associating, would fail it for nothing.
+            Self::cancel_core_timers(ports);
             let profiles = match profile::load_all(&self.profile_dir) {
                 Ok(profiles) => profiles,
                 // A profile store that cannot be read is not a reason to
@@ -553,8 +636,9 @@ impl Engine {
                 // The resolver is a file, not a netlink object, and a lease
                 // without working DNS looks exactly like no connection at
                 // all. Failure to write it is worth a line, not the lease.
-                if let Err(e) = write_resolv_conf(&lease.dns) {
-                    log::warn(format_args!("dhcp: resolv.conf: {e}"));
+                match write_resolv_conf(&lease.dns) {
+                    Ok(()) => self.check_resolver_link(),
+                    Err(e) => log::warn(format_args!("dhcp: resolv.conf: {e}")),
                 }
                 log::info(format_args!(
                     "dhcp: {}/{} on ifindex {ifindex}{}",
@@ -736,7 +820,8 @@ impl Engine {
     }
 
     /// An action could not be performed. Report it the way `caw-core` reports
-    /// a failure, so a client sees one shape of ending rather than two.
+    /// a failure, so a client sees one shape of ending rather than two, and
+    /// put the state machine back where a new command can find it.
     fn abort(&mut self, reason: String, ports: &mut Ports<'_>) {
         log::warn(format_args!("{reason}"));
         if let Some(client) = self.watcher.take() {
@@ -749,6 +834,67 @@ impl Engine {
             ports.server.send(client, Response::error(reason));
         }
         self.pending_secret = None;
+        self.reset(ports);
+    }
+
+    /// Return the state machine to `Idle` after one of its actions failed.
+    ///
+    /// `caw-core` believes the action happened: it has already moved to the
+    /// state that follows it, and the actions that came after — the timer
+    /// that would have moved it on again, above all — were dropped with the
+    /// failure. Left like that it never moves again: `caw status` reports a
+    /// connection that is not being made, and the autoconnect loop waits for
+    /// an `Idle` it never sees.
+    ///
+    /// A disconnect is the one command that leads to `Idle` from every state,
+    /// and it also tears down an association the kernel may still hold. Its
+    /// actions are performed best-effort: this is the failure path already,
+    /// and a second failure here has nothing left to abort. The watcher has
+    /// been answered by now, so the `Notify(Idle)` it produces reaches nobody.
+    fn reset(&mut self, ports: &mut Ports<'_>) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        for action in core.poll(Input::Command(Command::Disconnect)) {
+            let _ = self.perform(action, ports);
+        }
+        // The disconnect clears the timer the core believes is armed, but
+        // that belief can be wrong: `caw-core` forgets a timer the moment it
+        // asks for it to be cleared, and if the action before that clear was
+        // the one that failed, the clear was never performed. Cancel by kind
+        // rather than trust the bookkeeping.
+        Self::cancel_core_timers(ports);
+        // Nothing further will happen without a new command, so neither
+        // socket has a reason to stay open — the same cleanup a terminal
+        // `Action::Failed` gets.
+        *ports.eapol = None;
+        Self::stop_dhcp(ports);
+    }
+
+    /// Disarm every deadline `caw-core` asked for, whichever it thinks it has.
+    fn cancel_core_timers(ports: &mut Ports<'_>) {
+        ports.timers.cancel_if(|key| matches!(key, Key::Core(_)));
+    }
+
+    /// Say, once, if the resolver is not reading what was just written.
+    ///
+    /// A machine whose `/etc/resolv.conf` is a file of its own has a link
+    /// that carries traffic and no working DNS, which looks exactly like no
+    /// link at all; the one line that names the fix is worth more than the
+    /// silence.
+    fn check_resolver_link(&mut self) {
+        if self.resolver_warned {
+            return;
+        }
+        let points_here = std::fs::canonicalize("/etc/resolv.conf").ok()
+            == std::fs::canonicalize(RESOLV_CONF).ok();
+        if !points_here {
+            self.resolver_warned = true;
+            log::warn(format_args!(
+                "/etc/resolv.conf is not a link to {RESOLV_CONF}: the lease's DNS servers \
+                 are written but not in use (ln -sf {RESOLV_CONF} /etc/resolv.conf)"
+            ));
+        }
     }
 }
 
@@ -757,6 +903,9 @@ impl Engine {
 /// Written atomically -- temp file, then rename -- because a half-written
 /// resolv.conf turns every lookup on the machine into a parse error.
 fn write_resolv_conf(servers: &[std::net::Ipv4Addr]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
     if servers.is_empty() {
         return Ok(());
     }
@@ -764,7 +913,20 @@ fn write_resolv_conf(servers: &[std::net::Ipv4Addr]) -> std::io::Result<()> {
     for server in servers {
         text.push_str(&format!("nameserver {server}\n"));
     }
-    let tmp = "/etc/.resolv.conf.cawd";
-    std::fs::write(tmp, &text)?;
-    std::fs::rename(tmp, "/etc/resolv.conf")
+    // systemd's `RuntimeDirectory=` makes the directory in production; by
+    // hand, on a socket elsewhere, nothing else has. Best-effort: if this
+    // fails, the create below says why.
+    let _ = std::fs::create_dir_all(caw_ipc::RUNTIME_DIR);
+    let tmp = format!("{}/.resolv.conf.tmp", caw_ipc::RUNTIME_DIR);
+    let mut file = std::fs::File::create(&tmp)?;
+    // The mode is set explicitly rather than left to `create`, because the
+    // service runs under `UMask=0077` (right for the profiles, which hold
+    // passphrases) and that makes a fresh file 0600. A root-only resolver
+    // file is a machine on which nobody but root can look up a name.
+    // `fchmod` ignores the umask.
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(tmp, RESOLV_CONF)
 }

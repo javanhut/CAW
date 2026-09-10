@@ -175,12 +175,17 @@ Two consequences:
 ### 5.2 No async runtime
 
 `cawd` watches roughly six descriptors: rtnetlink, generic netlink, the EAPOL
-packet socket, the IPC listener, a `timerfd` and a `signalfd`. A `poll` loop
-over them is smaller and easier to reason about than an executor, and because
-every state machine is sans-IO there is nothing to await.
+packet socket, the IPC listener, a `timerfd` and the read end of a signal
+pipe. A `poll` loop over them is smaller and easier to reason about than an
+executor, and because every state machine is sans-IO there is nothing to
+await.
 
-`tokio` would also pull in the `libc` crate. `rustix` provides `poll`,
-`timerfd` and `signalfd` without it.
+`rustix` provides `poll`, `timerfd` and the pipe. It has no `signalfd`, and
+offers `sigaction` only as an `unsafe fn`, so the handler that writes to the
+pipe comes from `signal-hook` — the one dependency that binds libc through the
+`libc` crate. That libc is the one `std` links regardless (§2), so nothing new
+is linked, and the `unsafe` stays inside the dependency the way the netlink
+syscalls stay inside `rustix`.
 
 ### 5.3 Not everything goes through the daemon
 
@@ -352,25 +357,25 @@ It is a state change, so it needs root or the `caw` group like any other. The
 buffer when the daemon goes; a closed connection after that is success, not a
 failure, and the CLI treats it as such.
 
-This exists because `cawd` cannot catch SIGTERM. rustix 1.1.4 has no
-`signalfd` — it is listed in `rustix::not_implemented::yet` — and the signal
-calls it does have are `unsafe fn` behind its `runtime` feature, so there is no
-safe path from a signal to a pollable descriptor without libc. The unit file
-uses `caw shutdown` as its `ExecStop=`. On a plain `kill` nothing is left
-behind, because `RuntimeDirectory=` removes `/run/caw` and the kernel closes
-the descriptors, but the station leaves the air without deauthenticating and
-the AP holds the slot until its inactivity timeout.
+SIGTERM and SIGINT run the same teardown: the handler writes a byte to a pipe
+the reactor polls (§5.2), and the daemon disconnects, flushes its clients and
+removes the socket before it exits. `systemctl stop cawd` therefore needs no
+`ExecStop=`; `caw shutdown` is for a daemon that is not under systemd, or for
+stopping it from a client that has the socket and not the pid.
 
 ---
 
 ## 8. Security model
 
 **Privilege.** `cawd` runs as root but holds only `CAP_NET_ADMIN` (netlink,
-key installation) and `CAP_NET_RAW` (the EAPOL packet socket). The systemd unit
-drops everything else and applies the usual hardening, with one deliberate
-exception: `/dev/rfkill` stays reachable, because a soft-blocked radio is a
-leading cause of "wifi does not work" and caw should be able to report and
-clear it.
+key installation), `CAP_NET_RAW` (the EAPOL packet socket) and
+`CAP_NET_BIND_SERVICE` (the DHCP client's port 68). The systemd unit drops
+everything else and applies the usual hardening: the file system is read-only
+apart from `/run/caw` and `/var/lib/caw`, and no device node is reachable. A
+lease's DNS servers are therefore written to `/run/caw/resolv.conf`, which
+`/etc/resolv.conf` is expected to link to. Reporting and clearing a
+soft-blocked radio through `/dev/rfkill` — a leading cause of "wifi does not
+work" — is planned, and will need that one node allowed.
 
 **Authorization.** The daemon checks peer credentials on the socket
 (`SO_PEERCRED`) rather than relying on file mode alone. Read-only commands —
@@ -438,15 +443,11 @@ package manager's job.
 | Step | Scope | State |
 |---|---|---|
 | 1 | `caw-netlink`, `caw-rtnl` — `ports`, `port up`, `port info` | **done** |
-| 2 | `caw-80211`, `caw-nl80211` — `scan` with real security modes | planned |
-| 3 | `caw-crypto`, `caw-eapol` — WPA2-PSK, first connection | planned |
-| 4 | `caw-dhcp` — `port set dhcp`, traffic-carrying connections | planned |
-| 5 | `caw-ipc`, `cawd`, `caw-core` — rekey, reconnect, suspend/resume | planned |
-| 6 | WPA3-SAE, then 802.1X/EAP | planned |
-
-Steps 3 and 4 run in-process behind a direct path until step 5 moves them
-behind the daemon. The sans-IO split is what makes that migration cheap: the
-state machines do not change, only who calls `poll`.
+| 2 | `caw-80211`, `caw-nl80211` — `scan` with real security modes | **done** |
+| 3 | `caw-crypto`, `caw-eapol` — WPA2-PSK, first connection | **done** |
+| 4 | `caw-dhcp` — traffic-carrying connections | **done**; `port set dhcp` still has no IPC request |
+| 5 | `caw-ipc`, `cawd`, `caw-core` — rekey, reconnect, autoconnect | **done** |
+| 6 | WPA3-SAE, then 802.1X/EAP | in progress: the SAE state machine exists, but `caw-nl80211` does not send `NL80211_CMD_FRAME` yet, and the connect request cannot carry a PMK for devices that offload the handshake; 802.1X is behind the `enterprise` feature |
 
 ### Known constraints
 
@@ -458,7 +459,8 @@ state machines do not change, only who calls `poll`.
   wired NIC. nl80211 supersedes this at step 2.
 - There are no man pages or shell completions yet. Both are generatable from
   the clap definitions once the CLI settles.
-- `cawd` cannot catch SIGTERM, for the reason given in §7, so a clean stop goes
-  through `caw shutdown` (or `systemctl stop cawd`, which runs it). A `kill`
-  leaves nothing behind on disk but does not deauthenticate. Closing that gap
-  needs one `signalfd` in rustix and one arm in the reactor's dispatch.
+- `cawd` handles SIGTERM and SIGINT but not SIGKILL, which nothing can. After
+  a SIGKILL the kernel closes the descriptors and `RuntimeDirectory=` removes
+  `/run/caw`, so nothing is left behind on disk, but the station leaves the
+  air without deauthenticating and the AP holds it until its inactivity
+  timeout.

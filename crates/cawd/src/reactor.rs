@@ -1,18 +1,15 @@
 //! The poll loop: every descriptor the daemon owns, in one place.
 //!
-//! Five kinds of descriptor — the nl80211 event socket, an rtnetlink event
-//! socket, the EAPOL packet socket, the IPC listener with its clients, and a
-//! `timerfd` — and one thread. Nothing here decides anything: a request
-//! becomes an input to `caw-core`, and the actions that come back are
-//! performed against these descriptors by [`crate::engine`].
+//! Six kinds of descriptor — the nl80211 event socket, an rtnetlink event
+//! socket, the EAPOL packet socket, the IPC listener with its clients, a
+//! `timerfd`, and the read end of the signal pipe — and one thread. Nothing
+//! here decides anything: a request becomes an input to `caw-core`, and the
+//! actions that come back are performed against these descriptors by
+//! [`crate::engine`].
 //!
 //! Blocking is never allowed. Every socket is non-blocking, `poll` has no
 //! timeout of its own — the `timerfd` is the only deadline — and a client
 //! that stops reading is dropped rather than waited for.
-//!
-//! There is no `signalfd`, which there would be in a sixth arm of
-//! [`Reactor::dispatch`]; see the crate documentation for why it cannot exist
-//! in safe Rust today, and what stops the daemon instead.
 
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
@@ -28,6 +25,7 @@ use crate::auth::Database;
 use crate::engine::{DhcpRun, Engine, Ports};
 use crate::ipc::{ClientId, Server};
 use crate::links::{LinkEvent, LinkEvents};
+use crate::signals::Signals;
 use crate::timers::{TimerFd, Timers};
 use crate::{Error, log};
 
@@ -80,6 +78,7 @@ pub enum Key {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Source {
     Timer,
+    Signal,
     Listener,
     Client(ClientId),
     Wireless,
@@ -109,6 +108,9 @@ pub struct Reactor {
     ipc: Server,
     timers: Timers<Key>,
     timerfd: TimerFd,
+    /// SIGTERM and SIGINT. Absent when the handlers could not be installed,
+    /// in which case `caw shutdown` is the only clean way down.
+    signals: Option<Signals>,
     engine: Engine,
     /// Absent when cfg80211 is not loaded. Port commands still work, so
     /// refusing to start would take away more than it protects.
@@ -136,6 +138,16 @@ impl Reactor {
     pub fn new(socket: &std::path::Path, autoconnect: bool) -> Result<Self, Error> {
         let ipc = Server::bind(socket)?;
         log::info(format_args!("listening on {}", socket.display()));
+
+        let signals = match Signals::open() {
+            Ok(signals) => Some(signals),
+            Err(e) => {
+                log::warn(format_args!(
+                    "no signal handling: {e}; stop with `caw shutdown`"
+                ));
+                None
+            }
+        };
 
         let wireless = match Nl80211::open() {
             Ok(nl) => match nl.events() {
@@ -173,6 +185,7 @@ impl Reactor {
             ipc,
             timers: Timers::new(),
             timerfd: TimerFd::new()?,
+            signals,
             engine: Engine::new(),
             wireless,
             rtnl,
@@ -220,7 +233,7 @@ impl Reactor {
     /// Takes `&self` and returns owned sources so that the borrows the poll
     /// array holds on the descriptors end before anything is dispatched.
     fn wait(&self) -> Result<Vec<(Source, PollFlags)>, Errno> {
-        let mut fds = Vec::with_capacity(4 + self.ipc.clients().len());
+        let mut fds = Vec::with_capacity(7 + self.ipc.clients().len());
         let mut sources = Vec::with_capacity(fds.capacity());
 
         let mut watch = |fd, flags, source| {
@@ -228,6 +241,9 @@ impl Reactor {
             sources.push(source);
         };
         watch(self.timerfd.as_fd(), PollFlags::IN, Source::Timer);
+        if let Some(signals) = &self.signals {
+            watch(signals.as_fd(), PollFlags::IN, Source::Signal);
+        }
         watch(self.ipc.listener(), PollFlags::IN, Source::Listener);
         if let Some(w) = &self.wireless {
             watch(w.events.as_fd(), PollFlags::IN, Source::Wireless);
@@ -265,6 +281,7 @@ impl Reactor {
     fn dispatch(&mut self, source: Source, revents: PollFlags) {
         match source {
             Source::Timer => self.on_timer(),
+            Source::Signal => self.on_signal(),
             Source::Listener => {
                 for id in self.ipc.accept() {
                     let requests = self.ipc.read(id);
@@ -319,6 +336,16 @@ impl Reactor {
         }
     }
 
+    /// SIGTERM or SIGINT: the same way down as `caw shutdown`, so the station
+    /// deauthenticates whichever way the daemon is stopped.
+    fn on_signal(&mut self) {
+        if let Some(signals) = &self.signals {
+            signals.drain();
+        }
+        log::info(format_args!("stopping on signal"));
+        self.stopping = true;
+    }
+
     fn on_wireless(&mut self) {
         let Some(wireless) = &mut self.wireless else {
             return;
@@ -354,10 +381,13 @@ impl Reactor {
         let Some(links) = &mut self.links else {
             return;
         };
-        for event in links.read() {
+        // Drained into a vector first: the engine borrows the reactor's other
+        // fields, and the socket's borrow has to end before that.
+        let events = links.read();
+        for event in events {
             // Carrier is what tells a connection worth re-establishing from an
             // interface someone took down on purpose, so it is worth saying
-            // out loud even before `caw-core` acts on it.
+            // out loud even before the engine acts on it.
             if let LinkEvent::Changed {
                 ifindex,
                 up,
@@ -371,6 +401,7 @@ impl Reactor {
                     if carrier { "present" } else { "lost" }
                 ));
             }
+            self.with_engine(|engine, ports| engine.on_link(event, ports));
         }
     }
 

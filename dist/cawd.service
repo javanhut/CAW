@@ -8,18 +8,18 @@ After=sysinit.target
 Type=simple
 ExecStart=/usr/bin/cawd
 
-# cawd has no SIGTERM handler: there is no safe path from a signal to a
-# pollable descriptor without libc, and every crate is #![forbid(unsafe_code)].
-# `caw shutdown` asks over the socket instead, so the station deauthenticates
-# and the access point frees the slot rather than holding it until a timeout.
-# systemd still sends SIGTERM afterwards, which the daemon has usually beaten.
-ExecStop=/usr/bin/caw shutdown
+# The default KillSignal=, SIGTERM, is enough: cawd handles it the same way
+# as `caw shutdown`, deauthenticating before it exits so the access point
+# frees the station rather than holding it until a timeout.
 
 Restart=on-failure
 RestartSec=2
 
-# /run/caw holds the CLI socket; /var/lib/caw holds network profiles, which
-# contain passphrases and so stay root-only.
+# /run/caw holds the CLI socket and the resolv.conf a lease writes;
+# /var/lib/caw holds network profiles, which contain passphrases and so stay
+# root-only. The umask makes every file the daemon creates root-only by
+# default; the two that must not be — the socket and resolv.conf — are
+# chmod'ed explicitly after creation.
 RuntimeDirectory=caw
 RuntimeDirectoryMode=0755
 StateDirectory=caw
@@ -35,12 +35,11 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 
+# Nothing outside the runtime and state directories is written. A lease's DNS
+# servers go to /run/caw/resolv.conf, which /etc/resolv.conf is expected to
+# be a symlink to (see the README); replacing /etc/resolv.conf in place would
+# need all of /etc writable, since rename() onto a bind-mounted file fails.
 ProtectSystem=strict
-# A lease's DNS servers go into /etc/resolv.conf, written as a temporary file
-# in /etc and renamed over the top. `strict` makes /etc read-only, and a
-# ReadWritePaths= on the file alone would not do: rename() onto a bind mount
-# fails with EBUSY, and the temporary file does not exist to be mounted.
-ReadWritePaths=/etc
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -53,9 +52,10 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_PACKET AF_INET AF_INET6
 
-# Soft-blocked radios are a common cause of "wifi does not work"; leave the
-# rfkill node reachable so caw can report and clear it.
-DeviceAllow=/dev/rfkill rw
+# The daemon speaks to the kernel through sockets and touches no device node.
+# Reporting and clearing a soft-blocked radio through /dev/rfkill is not
+# implemented; when it is, it needs a `DeviceAllow=/dev/rfkill rw` here.
+DevicePolicy=closed
 
 [Install]
 WantedBy=multi-user.target

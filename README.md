@@ -27,11 +27,19 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it all fits together.
 ```bash
 make
 sudo make install
+sudo ln -sf /run/caw/resolv.conf /etc/resolv.conf
 sudo systemctl enable --now cawd
 ```
 
 Installs to `/usr`. Honours `DESTDIR` and `PREFIX`, so a PKGBUILD is just
 `build() { make; }` and `package() { make DESTDIR="$pkgdir" install; }`.
+
+The symlink is how a lease's DNS servers reach the resolver: `cawd` writes them
+to `/run/caw/resolv.conf`, the way systemd-resolved keeps its own under `/run`,
+because the service runs with `/etc` read-only and replacing
+`/etc/resolv.conf` in place would need all of it writable. Skip the link if
+something else manages the resolver; the daemon logs a line saying the lease's
+servers are not in use.
 
 WPA2/3-Enterprise is feature-gated because its TLS stack pulls in a C
 dependency; the default build stays pure Rust:
@@ -109,11 +117,9 @@ caw disconnect ExampleNetworkName
 caw shutdown
 ```
 
-`cawd` has no SIGTERM handler — there is no safe path from a signal to a
-pollable descriptor without libc, and every crate here forbids unsafe code — so
-this is the graceful way down. The daemon deauthenticates before it exits, and
-the access point frees the station instead of holding it until a timeout.
-`systemctl stop cawd` runs the same thing through `ExecStop=`.
+Or `systemctl stop cawd`, or a plain `kill`: SIGTERM and Ctrl-C take the same
+path as `caw shutdown`. Either way the daemon deauthenticates before it exits,
+and the access point frees the station instead of holding it until a timeout.
 
 ## Autoconnect
 
@@ -141,11 +147,23 @@ machine, run the daemon with `--no-autoconnect`.
 
 ## Status
 
-Working: `caw ports`, `caw port up`, `caw port info`.
+Working: `caw ports`, `caw port up`, `caw port info`, `caw scan`,
+`caw connect` and `caw disconnect` on open and WPA2-Personal networks with the
+handshake run by caw, `caw status`, `caw shutdown`, and autoconnect.
 
-Planned: `port set`, `scan`, `connect`, `disconnect`. These parse and exit
-non-zero with a message. The roadmap is in
-[ARCHITECTURE.md](docs/ARCHITECTURE.md#11-status).
+Not yet:
+
+- **`caw port set`** parses and exits non-zero: the daemon protocol has no
+  request for address configuration.
+- **WPA3-Personal (SAE).** The daemon cannot send the SAE commit and confirm
+  frames yet (`NL80211_CMD_FRAME` is not encoded), and because caw prefers SAE
+  where an access point offers it, this also covers WPA2/WPA3 transition-mode
+  networks. The attempt fails with a message saying so.
+- **Devices that run the handshake in firmware.** The connect request cannot
+  carry the PMK yet, so the attempt is refused with a message saying so.
+- **WPA2/3-Enterprise** is behind the `enterprise` build feature.
+
+The roadmap is in [ARCHITECTURE.md](docs/ARCHITECTURE.md#11-status).
 
 ## Development
 

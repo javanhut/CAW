@@ -14,3 +14,4 @@ caw-nl80211.workspace = true
 caw-rtnl.workspace = true
 rustix.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true

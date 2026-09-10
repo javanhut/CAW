@@ -18,24 +18,16 @@
 //! state machine below is sans-IO, there is nothing to await. `rustix` gives
 //! us `poll` and `timerfd` without libc.
 //!
-//! # Known gap: SIGTERM
+//! # Stopping
 //!
-//! The reactor has no `signalfd`, and cannot have one while this crate is
-//! `#![forbid(unsafe_code)]`: rustix 1.1.4 does not implement `signalfd` at
-//! all — it is listed in `rustix::not_implemented::yet` — and the signal calls
-//! it does have (`kernel_sigprocmask`, `kernel_sigaction`, `kernel_sigwait`)
-//! are `unsafe fn` behind its `runtime` feature. There is no safe path from a
-//! signal to a pollable descriptor without libc.
-//!
-//! So `cawd` is stopped through the socket: `caw shutdown`, which sends
-//! [`caw_ipc::Request::Shutdown`] from root or the `caw` group and runs the
-//! teardown a SIGTERM handler would — disconnect, then remove the socket. The
-//! systemd unit uses it as `ExecStop=`, so `systemctl stop cawd` takes the
-//! clean path too. On a plain SIGTERM the kernel closes the descriptors and
-//! `RuntimeDirectory=` removes `/run/caw`, so nothing is left behind — but the
-//! station leaves the air without deauthenticating and the AP holds it until
-//! the inactivity timeout. Closing that last gap needs one `signalfd` in
-//! rustix, and one arm in [`reactor`].
+//! Two ways, one teardown. SIGTERM (what `systemctl stop` and `kill` send)
+//! and SIGINT (Ctrl-C at a terminal) arrive through the self-pipe in
+//! [`signals`]; [`caw_ipc::Request::Shutdown`] arrives over the socket as
+//! `caw shutdown`, from root or the `caw` group. Either sets the reactor
+//! stopping, and it disconnects — so the access point sees a station leaving
+//! rather than one that stopped answering — flushes its clients and removes
+//! the socket. rustix has no `signalfd` and offers `sigaction` only as an
+//! `unsafe fn`, so the handler comes from `signal-hook`; see [`signals`].
 #![forbid(unsafe_code)]
 
 mod auth;
@@ -44,6 +36,7 @@ mod ipc;
 mod links;
 mod log;
 mod reactor;
+mod signals;
 mod timers;
 
 use std::path::PathBuf;

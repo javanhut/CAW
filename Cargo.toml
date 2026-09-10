@@ -27,6 +27,13 @@ serde   = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = { version = "1.9", features = ["derive"] }
 
+# The one signal handler: SIGTERM and SIGINT into a self-pipe the reactor
+# polls. Installing a handler is `sigaction`, which rustix only offers as an
+# `unsafe fn`; signal-hook contains that the way rustix contains the netlink
+# syscalls. It binds libc through the `libc` crate, but `std` links that libc
+# on Linux regardless (ARCHITECTURE.md §2), so nothing new is linked.
+signal-hook = { version = "0.4", default-features = false }
+
 # WPA primitives.
 aes     = "0.9"
 aes-kw  = "0.3"

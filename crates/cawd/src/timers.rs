@@ -59,6 +59,12 @@ impl<K: Copy + PartialEq> Timers<K> {
         self.entries.retain(|e| e.key != key);
     }
 
+    /// Cancel every timer whose key matches, for a caller that is discarding
+    /// whatever armed them and cannot know which ones it did.
+    pub fn cancel_if(&mut self, mut matches: impl FnMut(&K) -> bool) {
+        self.entries.retain(|e| !matches(&e.key));
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         self.entries.iter().map(|e| e.at).min()
     }
@@ -186,6 +192,22 @@ mod tests {
         let due = timers.expired(now + Duration::from_secs(5));
         assert_eq!(due, vec![Key::Handshake, Key::Scan]);
         assert_eq!(timers.next_deadline(), Some(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn cancelling_by_predicate_keeps_what_does_not_match() {
+        let now = base();
+        let mut timers = Timers::new();
+        timers.arm(Key::Scan, Duration::from_secs(3), now);
+        timers.arm(Key::Handshake, Duration::from_secs(1), now);
+        timers.arm(Key::Dhcp, Duration::from_secs(60), now);
+        timers.cancel_if(|k| matches!(k, Key::Scan | Key::Handshake));
+
+        assert_eq!(timers.next_deadline(), Some(now + Duration::from_secs(60)));
+        assert_eq!(
+            timers.expired(now + Duration::from_secs(600)),
+            vec![Key::Dhcp]
+        );
     }
 
     #[test]

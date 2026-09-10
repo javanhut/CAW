@@ -194,6 +194,28 @@ fn shutdown_answers_then_removes_the_socket() {
     );
 }
 
+/// SIGTERM is what `systemctl stop` and `kill` send, and it must take the same
+/// clean path as `caw shutdown`: exit successfully with the socket removed,
+/// rather than die with it left behind.
+#[test]
+fn sigterm_stops_it_cleanly() {
+    let mut daemon = Daemon::start("sigterm");
+    // Make sure it is serving, and so has installed its handlers, first.
+    let mut client = daemon.connect();
+    client.send(&Request::Status);
+    assert!(matches!(client.response(), Response::Status(_)));
+
+    let pid = rustix::process::Pid::from_child(&daemon.child);
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).expect("signal sent");
+
+    let status = daemon.child.wait().expect("cawd exits");
+    assert!(status.success(), "{status:?}");
+    assert!(
+        !daemon.socket.exists(),
+        "a socket left behind looks like a running daemon"
+    );
+}
+
 /// Taking over a socket another daemon is listening on would leave every
 /// client talking to a daemon nothing can reach.
 #[test]
