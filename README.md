@@ -52,9 +52,12 @@ make FEATURES=enterprise
 
 ```bash
 imlazy
-sudo imlazy install
+imlazy install
 sudo systemctl enable --now cawd
 ```
+
+The install and uninstall tasks request elevated permissions automatically;
+the build dependency runs as your normal user.
 
 ## Quick start
 

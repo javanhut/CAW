@@ -49,6 +49,7 @@ run = [
 ]
 
 [commands.install]
+escalate = true
 run = [
   "{{install}} -Dm755 {{targetdir}}/caw {{destdir}}{{bindir}}/caw",
   "{{install}} -Dm755 {{targetdir}}/cawd {{destdir}}{{bindir}}/cawd",
@@ -59,6 +60,7 @@ run = [
 dep = ["build"]
 
 [commands.uninstall]
+escalate = true
 run = [
   "rm -f {{destdir}}{{bindir}}/caw",
   "rm -f {{destdir}}{{bindir}}/cawd",
