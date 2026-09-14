@@ -975,6 +975,37 @@ fn an_open_network_skips_the_handshake() {
     let out = connection.poll(Input::Wireless(associated()));
     assert_eq!(tags(&out), ["ClearTimer", "Notify", "StartDhcp"]);
     assert_eq!(connection.state(), State::Configuring);
+    let out = connection.poll(Input::Lease(LeaseEvent::Acquired(lease())));
+    let saved = out
+        .iter()
+        .find_map(|action| match action {
+            Action::SaveProfile(profile) => Some((**profile).clone()),
+            _ => None,
+        })
+        .expect("an explicitly joined open network is saved");
+    assert!(saved.autoconnect);
+    assert_eq!(saved.credential, Credential::None);
+    let dir = TempDir::new();
+    profile::save(dir.path(), &saved).unwrap();
+
+    connection.poll(Input::Wireless(Event::Disconnected {
+        reason: 3,
+        by_ap: false,
+    }));
+    assert_eq!(connection.state(), State::Reconnecting);
+
+    // A fresh daemon must recover this choice from disk, as it does after
+    // restart or when resume discards the previous connection state.
+    let mut restarted = Connection::new(device(), profile::load_all(dir.path()).unwrap());
+    restarted.poll(Input::Command(Command::Autoconnect));
+    let out = restarted.poll(Input::ScanResults(vec![bss(
+        BSSID,
+        SSID,
+        -50,
+        Security::Open,
+    )]));
+    assert_eq!(restarted.state(), State::Associating);
+    assoc_request(&out);
 }
 
 /// A device that runs the handshake in firmware is given the key instead, and

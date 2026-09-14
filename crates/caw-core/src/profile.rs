@@ -57,7 +57,8 @@ impl Profile {
     /// open network authenticates nothing, so a saved one is just a name
     /// anybody in range can also broadcast, and `min_security` has nothing to
     /// bite on when the recorded floor is already Open. Turning the field back
-    /// on is a deliberate edit of the profile.
+    /// on is a deliberate edit of the profile. The connection state machine
+    /// also enables it after a network explicitly chosen by the user succeeds.
     pub fn new(ssid: Vec<u8>, security: Security, credential: Credential) -> Self {
         let autoconnect = !matches!(credential, Credential::None);
         Self {

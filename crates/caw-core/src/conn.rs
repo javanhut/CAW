@@ -1064,9 +1064,8 @@ impl Connection {
         }
     }
 
-    /// Write down a network that was joined with a typed passphrase, once it
-    /// has actually worked. Never before: a profile saved on a wrong
-    /// passphrase is a profile that fails forever.
+    /// Remember an explicitly joined network after address configuration
+    /// succeeds, including open networks that never request a secret.
     fn save_profile(&mut self, out: &mut Vec<Action>) {
         let Some(target) = self.target.as_mut() else {
             return;
@@ -1074,19 +1073,23 @@ impl Connection {
         if !target.save {
             return;
         }
-        let Some(secret) = target.secret.clone() else {
-            return;
-        };
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        target.save = false;
-
         let credential = match &session.choice.rsn {
-            Some(_) => Credential::Passphrase(secret),
+            Some(_) => {
+                let Some(secret) = target.secret.clone() else {
+                    return;
+                };
+                Credential::Passphrase(secret)
+            }
             None => Credential::None,
         };
-        let profile = Profile::new(target.ssid.clone(), session.choice.advertised, credential);
+        target.save = false;
+        let mut profile = Profile::new(target.ssid.clone(), session.choice.advertised, credential);
+        // This target came from an explicit Connect command and has now
+        // succeeded. Remember that choice even when no password was needed.
+        profile.autoconnect = true;
         self.insert_profile(profile.clone());
         out.push(Action::SaveProfile(Box::new(profile)));
     }

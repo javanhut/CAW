@@ -300,14 +300,12 @@ the two never both retry the same link.
 Two restrictions are worth stating, because they are what makes joining a
 network with nobody watching safe:
 
-- **A credential or nothing.** There is no client attached to answer
-  `Action::RequestSecret`, so only a profile that already holds a credential
-  can be joined unattended. `Profile::new` sets `autoconnect` for exactly those
-  and leaves it off for `Credential::None` — an open network authenticates
-  nothing, so a saved one is a name any AP in range can also broadcast, and the
-  downgrade floor has nothing to bite on when the recorded level is already
-  Open. A PSK or SAE network cannot be impersonated that way: the 4-way
-  handshake is mutual, and an AP without the passphrase fails it.
+- **Remember successful choices.** An explicit connection is saved after
+  address configuration succeeds, including open networks that need no
+  credential. These profiles enable autoconnect. Scanning alone never saves
+  a network. A profile constructed outside that connection path still defaults
+  to autoconnect off when it has no credential. An open network is identified
+  by SSID and cannot authenticate the access point.
 - **Off is reachable.** `cawd --no-autoconnect` turns the loop off for the
   machine; clearing `autoconnect` in a profile turns it off for one network.
 
