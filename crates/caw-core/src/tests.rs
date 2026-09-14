@@ -868,6 +868,12 @@ fn an_unknown_network_is_prompted_for_then_saved() {
         saved.credential,
         Credential::Passphrase(Secret::new(PASSPHRASE))
     );
+    let out = connection.poll(Input::Wireless(Event::Disconnected {
+        reason: 7,
+        by_ap: true,
+    }));
+    assert_eq!(connection.state(), State::Reconnecting);
+    assert_eq!(timer(&out, TimerId::ReconnectBackoff), BACKOFF_BASE_MS);
 }
 
 /// An unknown network that never appears fails outright: there is no profile

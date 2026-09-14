@@ -87,9 +87,9 @@ pub struct TimerFd {
 impl TimerFd {
     pub fn new() -> rustix::io::Result<Self> {
         let fd = timerfd_create(
-            // Monotonic, so a step of the wall clock cannot postpone a
-            // handshake retransmit by an hour or fire every timer at once.
-            TimerfdClockId::Monotonic,
+            // Includes suspend, so the reactor wakes promptly on resume.
+            // Wall-clock adjustments still cannot affect deadlines.
+            TimerfdClockId::Boottime,
             TimerfdFlags::CLOEXEC | TimerfdFlags::NONBLOCK,
         )?;
         Ok(Self { fd })

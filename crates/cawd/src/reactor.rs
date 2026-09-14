@@ -132,6 +132,8 @@ pub struct Reactor {
     /// Consecutive attempts that left the radio idle, for the backoff.
     auto_attempts: u32,
     stopping: bool,
+    suspend_offset: Duration,
+    auto_paused: bool,
 }
 
 impl Reactor {
@@ -196,6 +198,8 @@ impl Reactor {
             autoconnect,
             auto_attempts: 0,
             stopping: false,
+            suspend_offset: suspend_offset(),
+            auto_paused: false,
         })
     }
 
@@ -216,6 +220,7 @@ impl Reactor {
                 Err(Errno::INTR) => continue,
                 Err(e) => return Err(Error::Socket(e)),
             };
+            self.check_resume();
             for (source, revents) in ready {
                 self.dispatch(source, revents);
             }
@@ -316,8 +321,28 @@ impl Reactor {
             .timers
             .next_deadline()
             .map(|at| at.saturating_duration_since(Instant::now()));
-        self.timerfd.arm(delay)?;
+        self.timerfd.arm(Some(
+            delay
+                .unwrap_or(Duration::from_secs(2))
+                .min(Duration::from_secs(2)),
+        ))?;
         Ok(())
+    }
+
+    fn check_resume(&mut self) {
+        let offset = suspend_offset();
+        if offset.saturating_sub(self.suspend_offset) > Duration::from_millis(500) {
+            self.with_engine(|engine, ports| engine.resume(ports));
+            for client in self.scans.iter().map(|s| s.client).collect::<Vec<_>>() {
+                self.finish_scan(client, Response::error("scan interrupted by suspend"));
+            }
+            self.auto_attempts = 0;
+            if self.autoconnect {
+                self.timers
+                    .arm(Key::Autoconnect, Duration::ZERO, Instant::now());
+            }
+        }
+        self.suspend_offset = offset;
     }
 
     fn on_timer(&mut self) {
@@ -402,6 +427,11 @@ impl Reactor {
                 ));
             }
             self.with_engine(|engine, ports| engine.on_link(event, ports));
+            if self.autoconnect && !self.auto_paused && self.engine.is_idle() {
+                self.auto_attempts = 0;
+                self.timers
+                    .arm(Key::Autoconnect, AUTOCONNECT_START, Instant::now());
+            }
         }
     }
 
@@ -497,7 +527,9 @@ impl Reactor {
                 Err(e) => self.ipc.send(id, Response::error(e)),
             },
             Request::PortUp { name, up } => match self.set_port_up(&name, up) {
-                Ok(()) => self.ipc.send(id, Response::Ok),
+                Ok(()) => {
+                    self.ipc.send(id, Response::Ok);
+                }
                 Err(e) => self.ipc.send(id, Response::error(e)),
             },
             Request::Scan { port } => {
@@ -510,6 +542,7 @@ impl Reactor {
                 self.ipc.send(id, Response::Status(status));
             }
             Request::Connect { ssid, port } => {
+                self.auto_paused = false;
                 let ifindex = match self.wireless_ifindex_up(port.as_deref()) {
                     Ok(ifindex) => ifindex,
                     Err(e) => {
@@ -528,6 +561,8 @@ impl Reactor {
                     self.with_engine(|engine, ports| engine.disconnect(&ssid, id, ports))
                 {
                     self.ipc.send(id, Response::error(e));
+                } else {
+                    self.auto_paused = true;
                 }
             }
             Request::Secret { token, value } => {
@@ -596,6 +631,9 @@ impl Reactor {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no such port: {name}"))?;
         self.set_link_up(link.index, up)?;
+        if link.kind == Kind::Wireless {
+            self.auto_paused = !up;
+        }
         if up && link.kind == Kind::Wireless {
             self.disable_power_save(link.index, name);
         }
@@ -698,6 +736,7 @@ impl Reactor {
         // what someone means by "the network".
         results.sort_by_key(|bss| std::cmp::Reverse(bss.signal_dbm));
 
+        let profiles = self.engine.saved_profiles()?;
         Ok(results
             .into_iter()
             .map(|bss| NetworkSummary {
@@ -706,7 +745,7 @@ impl Reactor {
                 signal_dbm: bss.signal_dbm,
                 freq_mhz: bss.freq_mhz,
                 security: bss.security.as_str().to_owned(),
-                known: false,
+                known: profiles.iter().any(|p| p.ssid == bss.ssid),
             })
             .collect())
     }
@@ -733,7 +772,7 @@ impl Reactor {
         // this loop exists to produce. `caw-core` retries a network it has
         // joined with a backoff of its own, so there is nothing to do until it
         // gives up and lands back in `Idle`.
-        if !self.engine.is_idle() {
+        if self.auto_paused || !self.engine.is_idle() {
             self.auto_attempts = 0;
             self.timers
                 .arm(Key::Autoconnect, AUTOCONNECT_SETTLED, Instant::now());
@@ -886,6 +925,17 @@ fn autoconnect_backoff(attempts: u32) -> Duration {
         .saturating_mul(1u64 << doublings)
         .min(AUTOCONNECT_MAX.as_secs());
     Duration::from_secs(secs)
+}
+
+// BOOTTIME includes sleep; MONOTONIC (and Instant) does not. Their
+// difference detects suspend without confusing wall-clock adjustments for it.
+fn suspend_offset() -> Duration {
+    use rustix::time::{ClockId, clock_gettime};
+    let boot = clock_gettime(ClockId::Boottime);
+    let mono = clock_gettime(ClockId::Monotonic);
+    let boot = Duration::new(boot.tv_sec as u64, boot.tv_nsec as u32);
+    let mono = Duration::new(mono.tv_sec as u64, mono.tv_nsec as u32);
+    boot.saturating_sub(mono)
 }
 
 const NO_WIRELESS: &str = "no wireless stack: the kernel has no nl80211 family";

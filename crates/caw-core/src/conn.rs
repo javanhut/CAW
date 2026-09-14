@@ -472,6 +472,9 @@ impl Connection {
 
     /// Add or replace a saved network, after the daemon has written it out.
     pub fn insert_profile(&mut self, profile: Profile) {
+        if let Some(target) = self.target.as_mut().filter(|t| t.ssid == profile.ssid) {
+            target.retry = profile.autoconnect;
+        }
         self.profiles.retain(|p| p.ssid != profile.ssid);
         self.profiles.push(profile);
     }

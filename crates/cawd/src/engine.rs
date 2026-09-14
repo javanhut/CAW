@@ -141,6 +141,19 @@ impl Engine {
         self.device.map(|d| d.ifindex)
     }
 
+    pub fn saved_profiles(&self) -> Result<Vec<profile::Profile>, String> {
+        profile::load_all(&self.profile_dir).map_err(|e| e.to_string())
+    }
+
+    pub fn resume(&mut self, ports: &mut Ports<'_>) {
+        if !self.is_idle() {
+            self.abort(
+                "system resumed; re-establishing connection".to_owned(),
+                ports,
+            );
+        }
+    }
+
     pub fn ssid(&self) -> Option<String> {
         let ssid = self.core.as_ref()?.ssid()?;
         Some(String::from_utf8_lossy(ssid).into_owned())
@@ -310,9 +323,8 @@ impl Engine {
     /// away, so this is the report that can be relied on; where both arrive,
     /// whichever is first ends the connection and the second finds it idle.
     ///
-    /// Carrier is left alone on purpose: it is absent throughout association
-    /// and comes back with the keys, and the AP-side loss it also signals
-    /// arrives as a deauthentication that `caw-core` reconnects from.
+    /// Carrier loss matters once connected. During association it is normal;
+    /// after connection it can be the only loss notification a driver sends.
     pub fn on_link(&mut self, event: LinkEvent, ports: &mut Ports<'_>) {
         let Some(ifindex) = self.ifindex() else {
             return;
@@ -334,6 +346,19 @@ impl Engine {
                 ..
             } if changed == ifindex && !self.is_idle() => {
                 self.abort(format!("ifindex {ifindex} was taken down"), ports);
+            }
+            LinkEvent::Changed {
+                ifindex: changed,
+                up: true,
+                carrier: false,
+            } if changed == ifindex && self.state() == State::Connected => {
+                self.feed(
+                    Input::Wireless(caw_nl80211::Event::Disconnected {
+                        reason: 0,
+                        by_ap: false,
+                    }),
+                    ports,
+                );
             }
             _ => {}
         }
