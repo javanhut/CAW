@@ -15,10 +15,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use aes_kw::{KeyInit, KwAes128};
 use caw_80211::{Akm, Cipher, RsnIe, Security};
-use caw_crypto::{
-    KeyDescriptorVersion, PmkProvider, Ptk, SEED_LEN, SaeProvider, compute_mic, derive_pmk,
-    derive_ptk,
-};
+use caw_crypto::{KeyDescriptorVersion, Ptk, compute_mic, derive_pmk, derive_ptk};
+#[cfg(feature = "sae")]
+use caw_crypto::{PmkProvider, SEED_LEN, SaeProvider};
 use caw_eapol::{Eapol, KeyFrame, KeyInfo, PacketType, key};
 use caw_nl80211::{Bss, ConnectStatus, Event};
 
@@ -178,6 +177,7 @@ fn eapol_out(actions: &[Action]) -> &[u8] {
         .expect("an outgoing EAPOL frame")
 }
 
+#[cfg(feature = "sae")]
 fn mgmt_out(actions: &[Action]) -> &[u8] {
     actions
         .iter()
@@ -678,6 +678,7 @@ fn a_wpa2_network_under_a_wpa3_name_is_refused() {
 
 /// A network first joined in transition mode records the weaker half as its
 /// floor, so its own PSK side is not refused later.
+#[cfg(feature = "sae")]
 #[test]
 fn a_transition_network_joins_with_sae_and_is_not_refused_later() {
     let profile = Profile::new(
@@ -702,8 +703,38 @@ fn a_transition_network_joins_with_sae_and_is_not_refused_later() {
     assert_eq!(connection.security(), Some(Security::Wpa3Personal));
 }
 
+/// Until SAE has a transport, a transition network is joined on its PSK half
+/// rather than failing, and its floor still lets that half in next time.
+#[cfg(not(feature = "sae"))]
+#[test]
+fn a_transition_network_joins_with_psk_without_sae() {
+    let profile = Profile::new(
+        SSID.to_vec(),
+        Security::Wpa2Wpa3Personal,
+        Credential::Passphrase(Secret::new(PASSPHRASE)),
+    );
+    let mut connection = Connection::new(device(), vec![profile]);
+    connect(&mut connection);
+    let out = connection.poll(Input::ScanResults(vec![bss(
+        BSSID,
+        SSID,
+        -50,
+        Security::Wpa2Wpa3Personal,
+    )]));
+
+    assert_eq!(connection.state(), State::Associating);
+    let request = assoc_request(&out);
+    assert_eq!(request.auth_type, caw_nl80211::NL80211_AUTHTYPE_OPEN_SYSTEM);
+    assert_eq!(
+        request.akms,
+        vec![caw_nl80211::akm_suite(Akm::Psk)],
+        "the PSK half, not SAE"
+    );
+}
+
 /// SAE runs to completion before the association request goes out, and the
 /// request names the PMK it derived.
+#[cfg(feature = "sae")]
 #[test]
 fn sae_completes_before_the_association_request() {
     let profile = Profile::new(
@@ -1038,6 +1069,7 @@ fn an_offloading_device_is_handed_the_key() {
 
 /// A device that offloads SAE gets the password, not a PMK: it runs the
 /// Dragonfly exchange itself.
+#[cfg(feature = "sae")]
 #[test]
 fn an_sae_offloading_device_is_handed_the_password() {
     let mut device = device();
