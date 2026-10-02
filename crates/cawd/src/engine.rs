@@ -250,6 +250,30 @@ impl Engine {
         Ok(())
     }
 
+    /// Delete a network's saved profile.
+    ///
+    /// When that network is the one joined, it is left as well, and the `Ok`
+    /// arrives when the disconnect completes, exactly as for
+    /// [`Self::disconnect`]. Returns whether a disconnect was started; when it
+    /// was not, the caller answers straight away.
+    pub fn forget(
+        &mut self,
+        ssid: &str,
+        client: ClientId,
+        ports: &mut Ports<'_>,
+    ) -> Result<bool, String> {
+        let deleted =
+            profile::delete(&self.profile_dir, ssid.as_bytes()).map_err(|e| e.to_string())?;
+        if self.ssid().as_deref() == Some(ssid) {
+            self.disconnect(ssid, client, ports)?;
+            return Ok(true);
+        }
+        if !deleted {
+            return Err(format!("{ssid} is not a saved network"));
+        }
+        Ok(false)
+    }
+
     /// Answer an [`Event::NeedSecret`].
     pub fn secret(
         &mut self,

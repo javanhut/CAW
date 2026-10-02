@@ -43,6 +43,7 @@ fn main() -> ExitCode {
         Command::Scan { port } => wireless::scan(port),
         Command::Connect { ssid, port } => wireless::connect(&ssid, port),
         Command::Disconnect { ssid } => wireless::disconnect(&ssid),
+        Command::Forget { ssid } => wireless::forget(&ssid),
         Command::Status => wireless::status(),
         Command::Shutdown => wireless::shutdown(),
     };

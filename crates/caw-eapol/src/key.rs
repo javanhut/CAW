@@ -64,9 +64,9 @@ impl KeyInfo {
     /// The Key Data field is wrapped under the KEK.
     pub const ENCRYPTED: u16 = 1 << 12;
 
-    /// Which MIC and key-wrap pairing this frame uses.
-    pub fn version(self) -> Result<KeyDescriptorVersion, Error> {
-        Ok(KeyDescriptorVersion::from_key_info(self.0)?)
+    /// Which MIC and key-wrap pairing this frame uses under `akm`.
+    pub fn version(self, akm: caw_80211::Akm) -> Result<KeyDescriptorVersion, Error> {
+        Ok(KeyDescriptorVersion::from_key_info_for(self.0, akm)?)
     }
 
     pub fn pairwise(self) -> bool {

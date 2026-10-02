@@ -320,7 +320,7 @@ impl FourWay {
     /// answers with the SNonce and the RSN element from our association
     /// request.
     fn on_msg1(&mut self, eapol: &Eapol<'_>, msg1: &KeyFrame<'_>) -> Result<Vec<Action>, Error> {
-        let descriptor_version = msg1.key_info.version()?;
+        let descriptor_version = msg1.key_info.version(self.config.akm)?;
         let ptk = derive_ptk(
             &self.pmk,
             self.config.akm,

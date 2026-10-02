@@ -42,6 +42,11 @@ pub enum Command {
         /// Name (SSID) of the network.
         ssid: String,
     },
+    /// Forget a saved network, leaving it first if it is the one joined.
+    Forget {
+        /// Name (SSID) of the network.
+        ssid: String,
+    },
     /// Show the current wireless connection.
     Status,
     /// Stop the caw daemon, leaving any joined network cleanly first.
@@ -144,6 +149,10 @@ mod tests {
         match parse(&["caw", "disconnect", "HomeNet"]).command {
             Command::Disconnect { ssid } => assert_eq!(ssid, "HomeNet"),
             _ => panic!("expected disconnect"),
+        }
+        match parse(&["caw", "forget", "HomeNet"]).command {
+            Command::Forget { ssid } => assert_eq!(ssid, "HomeNet"),
+            _ => panic!("expected forget"),
         }
         assert!(matches!(parse(&["caw", "status"]).command, Command::Status));
     }

@@ -95,6 +95,22 @@ pub fn disconnect(ssid: &str) -> Result<()> {
     }
 }
 
+pub fn forget(ssid: &str) -> Result<()> {
+    let mut client = Client::connect()?;
+    match client.request(
+        &Request::Forget {
+            ssid: ssid.to_owned(),
+        },
+        report,
+    )? {
+        Response::Ok => {
+            eprintln!("forgot {ssid}");
+            Ok(())
+        }
+        _ => Err(crate::ipc::Error::Unexpected.into()),
+    }
+}
+
 pub fn status() -> Result<()> {
     let mut client = Client::connect()?;
     match client.request(&Request::Status, report)? {

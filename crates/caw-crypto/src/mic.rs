@@ -25,6 +25,11 @@ pub enum KeyDescriptorVersion {
     /// Version 3: AES-128-CMAC MIC with AES key wrap. Negotiated by the
     /// SHA-256 AKMs and required by SAE.
     AesCmac = 3,
+    /// Version 0: "AKM-defined". SAE (AKM 8 and its FT variant) names its MIC
+    /// through the AKM rather than this field, and that MIC is AES-128-CMAC
+    /// with AES key wrap — version 3's pairing under a different number. The
+    /// number still matters: replies have to echo the 0 the AP sent.
+    AkmDefinedCmac = 0,
 }
 
 impl KeyDescriptorVersion {
@@ -38,6 +43,18 @@ impl KeyDescriptorVersion {
             2 => Ok(Self::HmacSha1),
             3 => Ok(Self::AesCmac),
             _ => Err(Error::UnsupportedVersion),
+        }
+    }
+
+    /// Decode the subfield for a handshake running under `akm`.
+    ///
+    /// Version 0 hands the choice of MIC to the AKM, so it only means
+    /// something once the AKM is known. SAE is the one AKM caw runs that uses
+    /// it; a transition-mode AP joined with SAE sends it in message 1.
+    pub fn from_key_info_for(key_info: u16, akm: caw_80211::Akm) -> Result<Self, Error> {
+        match key_info & 0x0007 {
+            0 if akm.is_sae() => Ok(Self::AkmDefinedCmac),
+            _ => Self::from_key_info(key_info),
         }
     }
 
@@ -56,7 +73,7 @@ pub fn compute_mic(kck: &[u8; 16], version: KeyDescriptorVersion, frame: &[u8]) 
     let mut mic = [0u8; MIC_LEN];
     match version {
         KeyDescriptorVersion::HmacSha1 => mic.copy_from_slice(&hmac_sha1(kck, frame)[..MIC_LEN]),
-        KeyDescriptorVersion::AesCmac => {
+        KeyDescriptorVersion::AesCmac | KeyDescriptorVersion::AkmDefinedCmac => {
             let mut mac = Cmac::<Aes128>::new_from_slice(kck).expect("KCK is one AES-128 key");
             mac.update(frame);
             mic.copy_from_slice(&mac.finalize().into_bytes());
@@ -212,5 +229,30 @@ mod tests {
                 Err(Error::UnsupportedVersion)
             ));
         }
+    }
+
+    /// Version 0 is accepted only where the AKM defines it.
+    #[test]
+    fn version_zero_follows_the_akm() {
+        use caw_80211::Akm;
+        assert_eq!(
+            KeyDescriptorVersion::from_key_info_for(0x008a & !0x7, Akm::Sae).unwrap(),
+            KeyDescriptorVersion::AkmDefinedCmac
+        );
+        assert_eq!(KeyDescriptorVersion::AkmDefinedCmac.bits(), 0);
+        assert!(matches!(
+            KeyDescriptorVersion::from_key_info_for(0x0088, Akm::Psk),
+            Err(Error::UnsupportedVersion)
+        ));
+        // A SAE AP that sends version 3 anyway is still understood.
+        assert_eq!(
+            KeyDescriptorVersion::from_key_info_for(0x008b, Akm::Sae).unwrap(),
+            KeyDescriptorVersion::AesCmac
+        );
+        let kck = [0x42; 16];
+        assert_eq!(
+            compute_mic(&kck, KeyDescriptorVersion::AkmDefinedCmac, b"frame"),
+            compute_mic(&kck, KeyDescriptorVersion::AesCmac, b"frame")
+        );
     }
 }

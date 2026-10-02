@@ -75,6 +75,11 @@ pub enum Request {
     Disconnect {
         ssid: String,
     },
+    /// Delete the saved profile for a network, leaving it first when it is
+    /// the one joined. Answered with `Ok` once both are done.
+    Forget {
+        ssid: String,
+    },
     Status,
     /// Supply a secret the daemon asked for, keeping passphrases off argv
     /// where they would be visible in `ps`.
@@ -102,6 +107,7 @@ impl Request {
             Self::PortUp { .. }
             | Self::Connect { .. }
             | Self::Disconnect { .. }
+            | Self::Forget { .. }
             | Self::Shutdown => true,
         }
     }

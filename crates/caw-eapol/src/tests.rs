@@ -901,7 +901,7 @@ fn key_info_decodes_its_flags() {
             | KeyInfo::SECURE
             | KeyInfo::ENCRYPTED,
     );
-    assert_eq!(info.version().unwrap(), KeyDescriptorVersion::AesCmac);
+    assert_eq!(info.version(Akm::PskSha256).unwrap(), KeyDescriptorVersion::AesCmac);
     assert!(info.pairwise() && info.install() && info.ack());
     assert!(info.mic() && info.secure() && info.encrypted());
     assert!(!info.error() && !info.request());

@@ -565,6 +565,13 @@ impl Reactor {
                     self.auto_paused = true;
                 }
             }
+            Request::Forget { ssid } => {
+                match self.with_engine(|engine, ports| engine.forget(&ssid, id, ports)) {
+                    Ok(true) => {}
+                    Ok(false) => self.ipc.send(id, Response::Ok),
+                    Err(e) => self.ipc.send(id, Response::error(e)),
+                }
+            }
             Request::Secret { token, value } => {
                 if let Err(e) =
                     self.with_engine(|engine, ports| engine.secret(token, value, id, ports))
