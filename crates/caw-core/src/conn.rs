@@ -382,9 +382,26 @@ impl fmt::Display for Failure {
             ),
             Failure::AuthFailed => write!(f, "authentication rejected"),
             Failure::Handshake(why) => write!(f, "handshake failed: {why}"),
+            // `by_ap` is the only thing that says who ended it. Everything
+            // else — this machine, its kernel, its driver — reports with it
+            // unset, and reason 0 is what the driver sends when it gives none,
+            // including the carrier loss the daemon reports on its behalf.
+            Failure::Disconnected {
+                reason: 0,
+                by_ap: false,
+            } => {
+                write!(f, "the connection was lost (the driver gave no reason)")
+            }
             Failure::Disconnected { reason, by_ap } => {
-                let who = if *by_ap { "access point" } else { "link" };
-                write!(f, "disconnected by the {who} (reason {reason})")
+                let who = if *by_ap {
+                    "the access point disconnected us"
+                } else {
+                    "this machine ended the connection"
+                };
+                match caw_80211::reason_text(*reason) {
+                    Some(why) => write!(f, "{who}: {why} (reason {reason})"),
+                    None => write!(f, "{who} (reason {reason})"),
+                }
             }
             Failure::Dhcp => write!(f, "no address could be configured"),
             Failure::Enterprise(why) => write!(f, "{why}"),
@@ -1244,11 +1261,17 @@ impl Connection {
             },
             Event::Connected { .. } => {}
 
-            Event::Disconnected { reason, by_ap } => {
-                if self.state != State::Idle {
-                    self.fail(Failure::Disconnected { reason, by_ap }, out);
-                }
+            // Only an association can be lost. In any other state the event
+            // is about one that is already gone — most often caw's own
+            // teardown, which the kernel reports after the fact: a resume or
+            // a new `caw connect` disconnects and starts scanning at once,
+            // and the echo of that disconnect lands on the fresh attempt.
+            // Failing it there reported "disconnected (reason 3)" for a
+            // connection that was never at risk.
+            Event::Disconnected { reason, by_ap } if self.associated() => {
+                self.fail(Failure::Disconnected { reason, by_ap }, out);
             }
+            Event::Disconnected { .. } => {}
 
             // The kernel is withdrawing an external authentication request it
             // made earlier; there is nothing left to answer.
@@ -1323,11 +1346,7 @@ impl Connection {
         // An association the kernel still believes in has to be torn down, or
         // it will sit there without keys. Not after a disconnection, which is
         // the kernel telling us it already has.
-        let associated = matches!(
-            self.state,
-            State::Associating | State::Handshaking | State::Configuring | State::Connected
-        );
-        if associated && !matches!(failure, Failure::Disconnected { .. }) {
+        if self.associated() && !matches!(failure, Failure::Disconnected { .. }) {
             out.push(Action::Disconnect {
                 reason: REASON_LEAVING,
             });
@@ -1352,6 +1371,15 @@ impl Connection {
     }
 
     // -- helpers -----------------------------------------------------------
+
+    /// Whether the kernel holds, or is making, an association for this
+    /// connection: the states in which there is a link to lose.
+    fn associated(&self) -> bool {
+        matches!(
+            self.state,
+            State::Associating | State::Handshaking | State::Configuring | State::Connected
+        )
+    }
 
     fn arm(&mut self, id: TimerId, millis: u64, out: &mut Vec<Action>) {
         self.armed = Some(id);

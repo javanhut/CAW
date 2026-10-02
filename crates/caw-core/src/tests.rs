@@ -996,6 +996,85 @@ fn a_deauthentication_reconnects() {
     assert_eq!(timer(&out, TimerId::ReconnectBackoff), BACKOFF_BASE_MS);
 }
 
+/// What a resume does: tear the connection down, then autoconnect. The kernel
+/// reports that teardown after the fact, and by then a fresh attempt is
+/// scanning. The echo must not end the attempt it has nothing to do with.
+#[test]
+fn the_echo_of_our_own_disconnect_does_not_fail_the_next_attempt() {
+    let (mut connection, _) = connected(vec![profile_with(PASSPHRASE)]);
+
+    let out = connection.poll(Input::Command(Command::Disconnect));
+    assert!(tags(&out).contains(&"Disconnect"));
+    connection.poll(Input::Command(Command::Autoconnect));
+    assert_eq!(connection.state(), State::Scanning);
+
+    let out = connection.poll(Input::Wireless(Event::Disconnected {
+        reason: 3,
+        by_ap: false,
+    }));
+    assert!(out.is_empty(), "{:?}", tags(&out));
+    assert_eq!(connection.state(), State::Scanning);
+}
+
+/// The same echo, from `caw connect` replacing a connection that is up.
+#[test]
+fn connecting_while_connected_survives_the_old_link_going_down() {
+    let (mut connection, _) = connected(vec![profile_with(PASSPHRASE)]);
+
+    let out = connection.poll(Input::Command(Command::Connect {
+        ssid: SSID.to_vec(),
+    }));
+    assert_eq!(tags(&out)[0], "Disconnect");
+    assert_eq!(connection.state(), State::Scanning);
+
+    let out = connection.poll(Input::Wireless(Event::Disconnected {
+        reason: 3,
+        by_ap: false,
+    }));
+    assert!(out.is_empty(), "{:?}", tags(&out));
+    assert_eq!(connection.state(), State::Scanning);
+}
+
+#[test]
+fn a_disconnection_says_who_ended_it_and_why() {
+    let by_ap = Failure::Disconnected {
+        reason: 15,
+        by_ap: true,
+    }
+    .to_string();
+    assert!(
+        by_ap.starts_with("the access point disconnected us"),
+        "{by_ap}"
+    );
+    assert!(by_ap.contains("4-way handshake timeout"), "{by_ap}");
+    assert!(by_ap.ends_with("(reason 15)"), "{by_ap}");
+
+    let local = Failure::Disconnected {
+        reason: 3,
+        by_ap: false,
+    }
+    .to_string();
+    assert_eq!(
+        local,
+        "this machine ended the connection: the station is leaving the network (reason 3)"
+    );
+
+    let lost = Failure::Disconnected {
+        reason: 0,
+        by_ap: false,
+    }
+    .to_string();
+    assert_eq!(lost, "the connection was lost (the driver gave no reason)");
+
+    // A code with no name still reports the number.
+    let unknown = Failure::Disconnected {
+        reason: 28,
+        by_ap: true,
+    }
+    .to_string();
+    assert_eq!(unknown, "the access point disconnected us (reason 28)");
+}
+
 /// An open network has nothing to hand a handshake, so it goes from
 /// association straight to address configuration.
 #[test]

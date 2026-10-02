@@ -614,6 +614,55 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// What an 802.11 reason code means, from IEEE 802.11-2020 Table 9-49.
+///
+/// A reason code is the one explanation a disconnection carries, and a number
+/// on its own sends a person to the standard to find out whether the access
+/// point threw them off, the passphrase was wrong or the radio simply lost it.
+/// `None` for a code outside this table: reserved, or one only a mesh or a
+/// TDLS link would send.
+pub fn reason_text(code: u16) -> Option<&'static str> {
+    Some(match code {
+        1 => "unspecified reason",
+        2 => "previous authentication no longer valid",
+        3 => "the station is leaving the network",
+        4 => "inactive for too long",
+        5 => "the access point cannot handle any more stations",
+        6 => "a frame arrived from a station that had not authenticated",
+        7 => "a frame arrived from a station that had not associated",
+        8 => "the station is leaving the access point",
+        9 => "reassociation requested by a station that had not authenticated",
+        10 => "power capability unacceptable",
+        11 => "supported channels unacceptable",
+        12 => "moved off by BSS transition management",
+        13 => "invalid information element",
+        14 => "message integrity check failure",
+        15 => "4-way handshake timeout (often a wrong passphrase)",
+        16 => "group key handshake timeout",
+        17 => "security element differs from the one advertised",
+        18 => "invalid group cipher",
+        19 => "invalid pairwise cipher",
+        20 => "invalid key management suite",
+        21 => "unsupported RSN element version",
+        22 => "invalid RSN capabilities",
+        23 => "802.1X authentication failed",
+        24 => "cipher suite rejected by security policy",
+        25 => "TDLS direct link unreachable",
+        26 => "TDLS direct link torn down",
+        32 => "unspecified QoS reason",
+        33 => "not enough bandwidth for this station",
+        34 => "too many frames went unacknowledged (poor signal)",
+        35 => "transmitting outside the station's transmit opportunity limits",
+        36 => "the peer is leaving",
+        37 => "the peer does not want this mechanism",
+        38 => "the peer has not set up this mechanism",
+        39 => "the peer timed out",
+        45 => "cipher suite not supported by the peer",
+        46 => "the access point disassociated the station for another reason",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,5 +935,16 @@ mod tests {
         let mut ie = WPA2_PSK;
         ie[2] = 2;
         assert!(matches!(RsnIe::parse(&ie), Err(Error::Malformed)));
+    }
+
+    #[test]
+    fn reason_codes_have_names_and_gaps_do_not() {
+        assert_eq!(reason_text(3), Some("the station is leaving the network"));
+        assert!(reason_text(15).unwrap().contains("passphrase"));
+        // 0 is reserved, 27-31 are unassigned, and the table stops short of
+        // u16::MAX.
+        assert_eq!(reason_text(0), None);
+        assert_eq!(reason_text(28), None);
+        assert_eq!(reason_text(u16::MAX), None);
     }
 }
