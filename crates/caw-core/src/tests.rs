@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use aes_kw::{KeyInit, KwAes128};
 use caw_80211::{Akm, Cipher, RsnIe, Security};
 use caw_crypto::{KeyDescriptorVersion, Ptk, compute_mic, derive_pmk, derive_ptk};
-#[cfg(feature = "sae")]
 use caw_crypto::{PmkProvider, SEED_LEN, SaeProvider};
 use caw_eapol::{Eapol, KeyFrame, KeyInfo, PacketType, key};
 use caw_nl80211::{Bss, ConnectStatus, Event};
@@ -152,7 +151,7 @@ fn tags(actions: &[Action]) -> Vec<&'static str> {
             Action::FetchScanResults { .. } => "FetchScanResults",
             Action::Associate(_) => "Associate",
             Action::Disconnect { .. } => "Disconnect",
-            Action::SendMgmtFrame(_) => "SendMgmtFrame",
+            Action::Authenticate(_) => "Authenticate",
             Action::SendEapol(_) => "SendEapol",
             Action::InstallKeys(_) => "InstallKeys",
             Action::StartDhcp => "StartDhcp",
@@ -177,15 +176,35 @@ fn eapol_out(actions: &[Action]) -> &[u8] {
         .expect("an outgoing EAPOL frame")
 }
 
-#[cfg(feature = "sae")]
-fn mgmt_out(actions: &[Action]) -> &[u8] {
+fn auth_out(actions: &[Action]) -> &AuthRequest {
     actions
         .iter()
         .find_map(|a| match a {
-            Action::SendMgmtFrame(frame) => Some(&frame[..]),
+            Action::Authenticate(request) => Some(&**request),
             _ => None,
         })
-        .expect("an outgoing management frame")
+        .expect("an outgoing authentication frame")
+}
+
+/// An SAE frame as the AP's provider would read it: what caw hands the kernel
+/// starts at the sequence number, and the kernel puts the algorithm number
+/// (3, SAE) in front.
+fn as_sent(request: &AuthRequest) -> Vec<u8> {
+    let mut body = vec![3, 0];
+    body.extend_from_slice(&request.data);
+    body
+}
+
+/// An authentication frame from the AP as the kernel reports it: the whole
+/// management frame, 802.11 header included.
+fn from_ap(body: &[u8], transmitter: [u8; 6]) -> Event {
+    let mut frame = vec![0xb0, 0x00, 0x00, 0x00];
+    frame.extend_from_slice(&OWN_MAC);
+    frame.extend_from_slice(&transmitter);
+    frame.extend_from_slice(&transmitter);
+    frame.extend_from_slice(&[0x00, 0x00]);
+    frame.extend_from_slice(body);
+    Event::Authenticate(frame)
 }
 
 fn assoc_request(actions: &[Action]) -> &AssocRequest {
@@ -678,7 +697,6 @@ fn a_wpa2_network_under_a_wpa3_name_is_refused() {
 
 /// A network first joined in transition mode records the weaker half as its
 /// floor, so its own PSK side is not refused later.
-#[cfg(feature = "sae")]
 #[test]
 fn a_transition_network_joins_with_sae_and_is_not_refused_later() {
     let profile = Profile::new(
@@ -697,44 +715,14 @@ fn a_transition_network_joins_with_sae_and_is_not_refused_later() {
 
     assert_eq!(
         tags(&out),
-        ["ClearTimer", "Notify", "SendMgmtFrame", "SetTimer"]
+        ["ClearTimer", "Notify", "Authenticate", "SetTimer"]
     );
     assert_eq!(connection.state(), State::Authenticating);
     assert_eq!(connection.security(), Some(Security::Wpa3Personal));
 }
 
-/// Until SAE has a transport, a transition network is joined on its PSK half
-/// rather than failing, and its floor still lets that half in next time.
-#[cfg(not(feature = "sae"))]
-#[test]
-fn a_transition_network_joins_with_psk_without_sae() {
-    let profile = Profile::new(
-        SSID.to_vec(),
-        Security::Wpa2Wpa3Personal,
-        Credential::Passphrase(Secret::new(PASSPHRASE)),
-    );
-    let mut connection = Connection::new(device(), vec![profile]);
-    connect(&mut connection);
-    let out = connection.poll(Input::ScanResults(vec![bss(
-        BSSID,
-        SSID,
-        -50,
-        Security::Wpa2Wpa3Personal,
-    )]));
-
-    assert_eq!(connection.state(), State::Associating);
-    let request = assoc_request(&out);
-    assert_eq!(request.auth_type, caw_nl80211::NL80211_AUTHTYPE_OPEN_SYSTEM);
-    assert_eq!(
-        request.akms,
-        vec![caw_nl80211::akm_suite(Akm::Psk)],
-        "the PSK half, not SAE"
-    );
-}
-
 /// SAE runs to completion before the association request goes out, and the
 /// request names the PMK it derived.
-#[cfg(feature = "sae")]
 #[test]
 fn sae_completes_before_the_association_request() {
     let profile = Profile::new(
@@ -762,14 +750,29 @@ fn sae_completes_before_the_association_request() {
         Security::Wpa3Personal,
     )]));
     assert_eq!(connection.state(), State::Authenticating);
-    let commit = mgmt_out(&out).to_vec();
+    let request = auth_out(&out);
+    assert_eq!(request.bssid, BSSID);
+    assert_eq!(request.ssid, SSID);
+    assert_eq!(request.auth_type, caw_nl80211::NL80211_AUTHTYPE_SAE);
+    assert_eq!(
+        request.data[..2],
+        [1, 0],
+        "the body starts at the sequence number: a commit"
+    );
+    let commit = as_sent(request);
 
     let peer_commit = match peer.start(&peer_context).expect("a commit") {
         caw_crypto::Step::Send(frame) => frame,
         _ => panic!("SAE opens with a commit"),
     };
-    let out = connection.poll(Input::Wireless(Event::Frame(peer_commit)));
-    assert_eq!(tags(&out), ["SendMgmtFrame", "SetTimer"]);
+    // Somebody else's commit is dropped without failing the exchange.
+    let out = connection.poll(Input::Wireless(from_ap(&peer_commit, OTHER_BSSID)));
+    assert!(out.is_empty());
+    assert_eq!(connection.state(), State::Authenticating);
+
+    let out = connection.poll(Input::Wireless(from_ap(&peer_commit, BSSID)));
+    assert_eq!(tags(&out), ["Authenticate", "SetTimer"]);
+    assert_eq!(auth_out(&out).data[..2], [2, 0], "a confirm");
     assert_eq!(
         connection.state(),
         State::Authenticating,
@@ -780,7 +783,7 @@ fn sae_completes_before_the_association_request() {
         caw_crypto::Step::Send(frame) => frame,
         _ => panic!("a commit is answered with a confirm"),
     };
-    let out = connection.poll(Input::Wireless(Event::Frame(peer_confirm)));
+    let out = connection.poll(Input::Wireless(from_ap(&peer_confirm, BSSID)));
 
     assert_eq!(
         tags(&out),
@@ -788,8 +791,16 @@ fn sae_completes_before_the_association_request() {
     );
     assert_eq!(connection.state(), State::Associating);
     let request = assoc_request(&out);
+    assert!(
+        request.authenticated,
+        "associate, not connect: the kernel's SME cannot run SAE"
+    );
     assert_eq!(request.auth_type, caw_nl80211::NL80211_AUTHTYPE_SAE);
     assert_eq!(request.akms, vec![caw_nl80211::WLAN_AKM_SUITE_SAE]);
+    assert!(
+        request.ies.ends_with(&[244, 1, 0x20]),
+        "an RSNXE declaring hash-to-element"
+    );
     assert_eq!(request.mfp, Some(caw_nl80211::NL80211_MFP_REQUIRED));
     let element = RsnIe::parse(&request.ies).expect("our own element parses");
     assert!(
@@ -1069,7 +1080,6 @@ fn an_offloading_device_is_handed_the_key() {
 
 /// A device that offloads SAE gets the password, not a PMK: it runs the
 /// Dragonfly exchange itself.
-#[cfg(feature = "sae")]
 #[test]
 fn an_sae_offloading_device_is_handed_the_password() {
     let mut device = device();
@@ -1093,6 +1103,10 @@ fn an_sae_offloading_device_is_handed_the_password() {
         connection.state(),
         State::Associating,
         "no exchange runs here"
+    );
+    assert!(
+        !assoc_request(&out).authenticated,
+        "the device's SME runs SAE"
     );
     match &assoc_request(&out).offload {
         Some(Offload::SaePassword(secret)) => assert_eq!(secret.as_str(), PASSPHRASE),

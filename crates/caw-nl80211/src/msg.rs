@@ -132,6 +132,77 @@ pub fn connect(family: u16, seq: u32, ifindex: u32, req: &Connect<'_>) -> Vec<u8
     if let Some(freq) = req.freq_mhz {
         b = b.attr_u32(NL80211_ATTR_WIPHY_FREQ, freq);
     }
+    b = crypto_settings(b, req);
+    // A flag attribute, and the kernel's own switch between an open network
+    // and one whose association must be followed by a key exchange.
+    if req.group_cipher.is_some() || !req.pairwise_ciphers.is_empty() {
+        b = b.attr(NL80211_ATTR_PRIVACY, &[]);
+    }
+    b.finish()
+}
+
+/// One authentication frame for the kernel to send, on a device whose SME
+/// lives in userspace.
+///
+/// This is how SAE runs on a mac80211 device. The kernel's own SME — the one
+/// behind `NL80211_CMD_CONNECT` — cannot run SAE, so the station authenticates
+/// frame by frame here and then associates with [`associate`]. The kernel
+/// writes the 802.11 header and the Authentication Algorithm Number; the rest
+/// of the body is `data`.
+#[derive(Clone, Debug)]
+pub struct Authenticate<'a> {
+    pub ssid: &'a [u8],
+    pub bssid: [u8; 6],
+    pub freq_mhz: u32,
+    /// `NL80211_AUTHTYPE_*`.
+    pub auth_type: u32,
+    /// The frame body from the transaction sequence number onwards, which is
+    /// where `NL80211_ATTR_AUTH_DATA` is defined to begin.
+    pub data: &'a [u8],
+}
+
+/// Send one authentication frame. The AP's answer arrives as
+/// [`crate::Event::Authenticate`] on the `mlme` group.
+pub fn authenticate(family: u16, seq: u32, ifindex: u32, req: &Authenticate<'_>) -> Vec<u8> {
+    MsgBuilder::new(family, NLM_F_REQUEST | NLM_F_ACK, seq)
+        .header(&genlmsghdr(NL80211_CMD_AUTHENTICATE, 0))
+        .attr_u32(NL80211_ATTR_IFINDEX, ifindex)
+        .attr(NL80211_ATTR_MAC, &req.bssid)
+        .attr_u32(NL80211_ATTR_WIPHY_FREQ, req.freq_mhz)
+        .attr(NL80211_ATTR_SSID, req.ssid)
+        .attr_u32(NL80211_ATTR_AUTH_TYPE, req.auth_type)
+        .attr(NL80211_ATTR_AUTH_DATA, req.data)
+        .finish()
+}
+
+/// Associate with a BSS already authenticated with [`authenticate`].
+///
+/// Takes the same request as [`connect`], but the BSSID and frequency are
+/// required: `NL80211_CMD_ASSOCIATE` names one BSS out of the kernel's scan
+/// cache rather than asking the SME to choose. The authentication type and
+/// the privacy flag are left out because they belong to the authentication
+/// that has already happened.
+///
+/// The outcome arrives as [`crate::Event::Connected`], exactly as it does for
+/// `connect`: cfg80211 reports an association it did not drive the same way
+/// as one it did.
+pub fn associate(family: u16, seq: u32, ifindex: u32, req: &Connect<'_>) -> Vec<u8> {
+    let mut b = MsgBuilder::new(family, NLM_F_REQUEST | NLM_F_ACK, seq)
+        .header(&genlmsghdr(NL80211_CMD_ASSOCIATE, 0))
+        .attr_u32(NL80211_ATTR_IFINDEX, ifindex)
+        .attr(NL80211_ATTR_SSID, req.ssid);
+    if let Some(bssid) = req.bssid {
+        b = b.attr(NL80211_ATTR_MAC, &bssid);
+    }
+    if let Some(freq) = req.freq_mhz {
+        b = b.attr_u32(NL80211_ATTR_WIPHY_FREQ, freq);
+    }
+    crypto_settings(b, req).finish()
+}
+
+/// The suites, management frame protection and station elements, which
+/// `connect` and `associate` carry identically.
+fn crypto_settings(mut b: MsgBuilder, req: &Connect<'_>) -> MsgBuilder {
     if req.wpa_versions != 0 {
         b = b.attr_u32(NL80211_ATTR_WPA_VERSIONS, req.wpa_versions);
     }
@@ -153,12 +224,7 @@ pub fn connect(family: u16, seq: u32, ifindex: u32, req: &Connect<'_>) -> Vec<u8
     if !req.ies.is_empty() {
         b = b.attr(NL80211_ATTR_IE, req.ies);
     }
-    // A flag attribute, and the kernel's own switch between an open network
-    // and one whose association must be followed by a key exchange.
-    if req.group_cipher.is_some() || !req.pairwise_ciphers.is_empty() {
-        b = b.attr(NL80211_ATTR_PRIVACY, &[]);
-    }
-    b.finish()
+    b
 }
 
 /// Leave the current network. `reason` is an 802.11 reason code; 3,

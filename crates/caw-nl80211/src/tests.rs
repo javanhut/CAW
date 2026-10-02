@@ -7,7 +7,9 @@ use caw_netlink::{ATTR_HDR_LEN, HDR_LEN, Message, align};
 use crate::attr::{Attrs, GENL_HDRLEN, NLA_F_NESTED, genlmsghdr, u16_of};
 use crate::consts::*;
 use crate::wiphy::WiphyChunk;
-use crate::{Bss, Connect, Event, ExtFeatures, Family, Groups, KeyScope, Nest, mbm_to_dbm, msg};
+use crate::{
+    Authenticate, Bss, Connect, Event, ExtFeatures, Family, Groups, KeyScope, Nest, mbm_to_dbm, msg,
+};
 
 /// Encode one attribute, independently of [`Nest`], so that a parser bug and
 /// a builder bug cannot cancel out.
@@ -438,6 +440,83 @@ fn connect_carries_the_negotiated_suites() {
 }
 
 #[test]
+fn authenticate_carries_the_frame_body_from_the_sequence_number() {
+    // An SAE commit as the kernel wants it: transaction sequence 1, status
+    // 126 (H2E), then the group. The algorithm number is the kernel's to add.
+    let data = [0x01, 0x00, 0x7e, 0x00, 0x13, 0x00];
+    let bytes = msg::authenticate(
+        28,
+        3,
+        7,
+        &Authenticate {
+            ssid: b"sae",
+            bssid: [0x02, 0, 0, 0, 0x01, 0],
+            freq_mhz: 5180,
+            auth_type: NL80211_AUTHTYPE_SAE,
+            data: &data,
+        },
+    );
+
+    let payload = built_body(&bytes);
+    assert_eq!(payload[..GENL_HDRLEN], [NL80211_CMD_AUTHENTICATE, 0, 0, 0]);
+    let get = |kind| Attrs::of_body(payload).find(kind);
+    assert_eq!(get(NL80211_ATTR_IFINDEX).unwrap().u32(), Some(7));
+    assert_eq!(
+        get(NL80211_ATTR_MAC).unwrap().payload,
+        [0x02, 0, 0, 0, 0x01, 0]
+    );
+    assert_eq!(get(NL80211_ATTR_WIPHY_FREQ).unwrap().u32(), Some(5180));
+    assert_eq!(get(NL80211_ATTR_SSID).unwrap().payload, b"sae");
+    assert_eq!(
+        get(NL80211_ATTR_AUTH_TYPE).unwrap().u32(),
+        Some(NL80211_AUTHTYPE_SAE)
+    );
+    assert_eq!(get(NL80211_ATTR_AUTH_DATA).unwrap().payload, data);
+}
+
+#[test]
+fn associate_carries_the_suites_but_not_the_authentication() {
+    let bytes = msg::associate(
+        28,
+        4,
+        7,
+        &Connect {
+            ssid: b"sae",
+            bssid: Some([0x02, 0, 0, 0, 0x01, 0]),
+            freq_mhz: Some(5180),
+            auth_type: NL80211_AUTHTYPE_SAE,
+            wpa_versions: NL80211_WPA_VERSION_3,
+            pairwise_ciphers: &[WLAN_CIPHER_SUITE_CCMP],
+            group_cipher: Some(WLAN_CIPHER_SUITE_CCMP),
+            akms: &[WLAN_AKM_SUITE_SAE],
+            mfp: Some(NL80211_MFP_REQUIRED),
+            ies: &RSN_WPA2_PSK,
+        },
+    );
+
+    let payload = built_body(&bytes);
+    assert_eq!(payload[..GENL_HDRLEN], [NL80211_CMD_ASSOCIATE, 0, 0, 0]);
+    let get = |kind| Attrs::of_body(payload).find(kind);
+    assert_eq!(
+        get(NL80211_ATTR_MAC).unwrap().payload,
+        [0x02, 0, 0, 0, 0x01, 0]
+    );
+    assert_eq!(get(NL80211_ATTR_WIPHY_FREQ).unwrap().u32(), Some(5180));
+    assert_eq!(
+        get(NL80211_ATTR_AKM_SUITES).unwrap().u32(),
+        Some(WLAN_AKM_SUITE_SAE)
+    );
+    assert_eq!(
+        get(NL80211_ATTR_USE_MFP).unwrap().u32(),
+        Some(NL80211_MFP_REQUIRED)
+    );
+    assert_eq!(get(NL80211_ATTR_IE).unwrap().payload, RSN_WPA2_PSK);
+    // Both belong to the authentication that already happened.
+    assert!(get(NL80211_ATTR_AUTH_TYPE).is_none());
+    assert!(get(NL80211_ATTR_PRIVACY).is_none());
+}
+
+#[test]
 fn an_open_network_connects_without_privacy() {
     let bytes = msg::connect(
         28,
@@ -690,6 +769,23 @@ fn events_decode_from_their_command() {
         &[attr(NL80211_ATTR_FRAME, &[0xb0, 0x00])],
     );
     assert_eq!(Event::decode(&frame), Some(Event::Frame(vec![0xb0, 0x00])));
+
+    let auth = body(
+        NL80211_CMD_AUTHENTICATE,
+        &[attr(NL80211_ATTR_FRAME, &[0xb0, 0x00])],
+    );
+    assert_eq!(
+        Event::decode(&auth),
+        Some(Event::Authenticate(vec![0xb0, 0x00]))
+    );
+    let auth_timeout = body(
+        NL80211_CMD_AUTHENTICATE,
+        &[
+            attr(NL80211_ATTR_TIMED_OUT, &[]),
+            attr(NL80211_ATTR_MAC, &[0x02, 0, 0, 0, 0x01, 0]),
+        ],
+    );
+    assert_eq!(Event::decode(&auth_timeout), Some(Event::AuthTimedOut));
 
     // Regulatory changes and survey results ride the same groups.
     assert_eq!(Event::decode(&body(36, &[])), None);

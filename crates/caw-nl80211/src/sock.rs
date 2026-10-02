@@ -14,7 +14,7 @@ use rustix::net::{AddressFamily, RecvFlags, SocketFlags, SocketType, netlink};
 use crate::attr::Attrs;
 use crate::consts::*;
 use crate::wiphy::WiphyChunk;
-use crate::{Bss, Connect, Error, Event, Family, Interface, KeyScope, Wiphy, msg};
+use crate::{Authenticate, Bss, Connect, Error, Event, Family, Interface, KeyScope, Wiphy, msg};
 
 /// The nl80211 family name, as registered by cfg80211.
 pub const NL80211_FAMILY_NAME: &str = "nl80211";
@@ -132,6 +132,25 @@ impl Nl80211 {
     pub fn connect(&mut self, ifindex: u32, req: &Connect<'_>) -> Result<(), Error> {
         let seq = self.sock.next_seq();
         let bytes = msg::connect(self.family.id, seq, ifindex, req);
+        self.sock.request(&bytes, |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Send one authentication frame; see [`msg::authenticate`]. The AP's
+    /// answer arrives as [`Event::Authenticate`].
+    pub fn authenticate(&mut self, ifindex: u32, req: &Authenticate<'_>) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let bytes = msg::authenticate(self.family.id, seq, ifindex, req);
+        self.sock.request(&bytes, |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Associate with a BSS this station has already authenticated with. The
+    /// result arrives as [`Event::Connected`], as it does for
+    /// [`Nl80211::connect`].
+    pub fn associate(&mut self, ifindex: u32, req: &Connect<'_>) -> Result<(), Error> {
+        let seq = self.sock.next_seq();
+        let bytes = msg::associate(self.family.id, seq, ifindex, req);
         self.sock.request(&bytes, |_| Ok(()))?;
         Ok(())
     }

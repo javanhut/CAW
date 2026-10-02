@@ -40,9 +40,9 @@ mod tests;
 
 pub use auth::{DeviceCaps, Offload};
 pub use conn::{
-    ASSOC_TIMEOUT_MS, AUTH_TIMEOUT_MS, Action, AssocRequest, BACKOFF_BASE_MS, BACKOFF_MAX_MS,
-    Command, Connection, Device, Failure, GroupKey, Input, KeyInstall, LeaseEvent, PairwiseKey,
-    SCAN_TIMEOUT_MS, State, TimerId,
+    ASSOC_TIMEOUT_MS, AUTH_TIMEOUT_MS, Action, AssocRequest, AuthRequest, BACKOFF_BASE_MS,
+    BACKOFF_MAX_MS, Command, Connection, Device, Failure, GroupKey, Input, KeyInstall, LeaseEvent,
+    PairwiseKey, SCAN_TIMEOUT_MS, State, TimerId,
 };
 pub use profile::{Credential, EnterpriseMethod, Profile, Secret};
 pub use rsn::StationRsn;

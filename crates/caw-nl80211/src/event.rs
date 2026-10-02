@@ -42,8 +42,14 @@ pub enum Event {
         /// it made earlier, not asking for a new exchange.
         abort: bool,
     },
-    /// A management frame we registered interest in (SAE commit/confirm).
+    /// A management frame we registered interest in.
     Frame(Vec<u8>),
+    /// An authentication frame from the AP, answering one sent with
+    /// [`crate::msg::authenticate`]: SAE's commit and confirm. The whole
+    /// management frame, 802.11 header included.
+    Authenticate(Vec<u8>),
+    /// The kernel gave up waiting for an answer to an authentication frame.
+    AuthTimedOut,
 }
 
 /// How an association attempt ended.
@@ -112,6 +118,13 @@ impl Event {
                     == Some(NL80211_EXTERNAL_AUTH_ABORT),
             }),
             NL80211_CMD_FRAME => Some(Self::Frame(find(NL80211_ATTR_FRAME)?.payload.to_vec())),
+            // A timeout carries the BSSID and no frame.
+            NL80211_CMD_AUTHENTICATE if find(NL80211_ATTR_TIMED_OUT).is_some() => {
+                Some(Self::AuthTimedOut)
+            }
+            NL80211_CMD_AUTHENTICATE => Some(Self::Authenticate(
+                find(NL80211_ATTR_FRAME)?.payload.to_vec(),
+            )),
             _ => None,
         }
     }

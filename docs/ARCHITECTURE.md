@@ -445,7 +445,7 @@ package manager's job.
 | 3 | `caw-crypto`, `caw-eapol` — WPA2-PSK, first connection | **done** |
 | 4 | `caw-dhcp` — traffic-carrying connections | **done**; `port set dhcp` still has no IPC request |
 | 5 | `caw-ipc`, `cawd`, `caw-core` — rekey, reconnect, autoconnect | **done** |
-| 6 | WPA3-SAE, then 802.1X/EAP | in progress: the SAE state machine exists, but `caw-nl80211` does not send `NL80211_CMD_FRAME` yet, and the connect request cannot carry a PMK for devices that offload the handshake; 802.1X is behind the `enterprise` feature |
+| 6 | WPA3-SAE, then 802.1X/EAP | in progress: SAE (H2E) runs over `NL80211_CMD_AUTHENTICATE` then `NL80211_CMD_ASSOCIATE`; the connect request cannot yet carry a PMK for devices that offload the handshake, and the IGTK is not installed; 802.1X is behind the `enterprise` feature |
 
 ### Known constraints
 

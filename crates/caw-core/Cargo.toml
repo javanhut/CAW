@@ -13,12 +13,6 @@ default = []
 # rather than a parse error.
 enterprise = ["caw-eapol/enterprise"]
 
-# WPA3-Personal (SAE). Off until cawd has a transport for the exchange: on a
-# mac80211 device SAE runs through NL80211_CMD_AUTHENTICATE followed by
-# NL80211_CMD_ASSOCIATE, and caw-nl80211 encodes neither. Without it, a
-# WPA2/WPA3 transition network is joined on its PSK half, and a WPA3-only one
-# is refused up front as unsupported rather than failing mid-connect.
-sae = []
 
 [dependencies]
 caw-80211.workspace = true

@@ -151,19 +151,18 @@ machine, run the daemon with `--no-autoconnect`.
 ## Status
 
 Working: `caw ports`, `caw port up`, `caw port info`, `caw scan`,
-`caw connect` and `caw disconnect` on open and WPA2-Personal networks with the
-handshake run by caw, `caw status`, `caw shutdown`, and autoconnect.
+`caw connect` and `caw disconnect` on open, WPA2-Personal and WPA3-Personal
+(SAE, hash-to-element only) networks with the handshake run by caw,
+`caw status`, `caw shutdown`, and autoconnect.
 
 Not yet:
 
 - **`caw port set`** parses and exits non-zero: the daemon protocol has no
   request for address configuration.
-- **WPA3-Personal (SAE).** The daemon cannot put SAE frames on the air yet
-  (on mac80211 devices that needs `NL80211_CMD_AUTHENTICATE` and
-  `NL80211_CMD_ASSOCIATE`, which `caw-nl80211` does not encode), so SAE is
-  behind caw-core's `sae` feature. Without it, WPA2/WPA3 transition-mode
-  networks are joined on their WPA2-PSK half, and WPA3-only networks are
-  refused as unsupported.
+- **WPA3 extras.** SAE runs hash-to-element only, so an AP that offers only
+  hunting-and-pecking is refused. caw does not install the IGTK, so broadcast
+  management frames under PMF are dropped rather than verified, and it does
+  not roam between APs of a WPA3 network while connected.
 - **Devices that run the handshake in firmware.** The connect request cannot
   carry the PMK yet, so the attempt is refused with a message saying so.
 - **WPA2/3-Enterprise** is behind the `enterprise` build feature.

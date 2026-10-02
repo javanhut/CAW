@@ -9,15 +9,11 @@
 //!
 //! # What cannot be performed yet
 //!
-//! Two actions have no transport under them, and each returns an error
-//! naming what is missing rather than pretending to succeed:
-//!
-//!   * `SendMgmtFrame` — SAE's commit and confirm need `NL80211_CMD_FRAME`,
-//!     which `caw-nl80211` does not encode.
-//!   * `Associate` with an [`Offload`](caw_core::Offload) — a device that runs
-//!     the handshake in firmware wants `NL80211_ATTR_PMK` or
-//!     `NL80211_ATTR_SAE_PASSWORD` in the connect request, and
-//!     `caw_nl80211::Connect` has no field for either.
+//! `Associate` with an [`Offload`](caw_core::Offload) has no transport under
+//! it, and returns an error naming what is missing rather than pretending to
+//! succeed: a device that runs the handshake in firmware wants
+//! `NL80211_ATTR_PMK` or `NL80211_ATTR_SAE_PASSWORD` in the connect request,
+//! and `caw_nl80211::Connect` has no field for either.
 
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -30,7 +26,7 @@ use caw_core::{
 use caw_dhcp::{Dhcp4, Dhcp4Socket};
 use caw_eapol::EapolSocket;
 use caw_ipc::{Event, Response, SecretKind};
-use caw_nl80211::{Connect, KeyScope, Nl80211};
+use caw_nl80211::{Authenticate, Connect, KeyScope, Nl80211};
 use caw_rtnl::{Rtnl, format_mac};
 
 use crate::ipc::{ClientId, Server};
@@ -524,9 +520,28 @@ impl Engine {
                     mfp: req.mfp,
                     ies: &req.ies,
                 };
+                // After SAE the station has authenticated itself, and only the
+                // association is left for the kernel.
+                let nl = ports.nl()?;
+                if req.authenticated {
+                    nl.associate(req.ifindex, &connect)
+                } else {
+                    nl.connect(req.ifindex, &connect)
+                }
+                .map_err(|e| e.to_string())?;
+            }
+
+            Action::Authenticate(req) => {
+                let auth = Authenticate {
+                    ssid: &req.ssid,
+                    bssid: req.bssid,
+                    freq_mhz: req.freq_mhz,
+                    auth_type: req.auth_type,
+                    data: &req.data,
+                };
                 ports
                     .nl()?
-                    .connect(req.ifindex, &connect)
+                    .authenticate(req.ifindex, &auth)
                     .map_err(|e| e.to_string())?;
             }
 
@@ -541,12 +556,6 @@ impl Engine {
             Action::SendEapol(frame) => {
                 let eapol = ports.eapol.as_ref().ok_or("no EAPOL socket")?;
                 eapol.send(&frame).map_err(|e| e.to_string())?;
-            }
-
-            Action::SendMgmtFrame(_) => {
-                return Err(
-                    "SAE needs NL80211_CMD_FRAME, which caw-nl80211 does not send yet".to_owned(),
-                );
             }
 
             Action::InstallKeys(keys) => {

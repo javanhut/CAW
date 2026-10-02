@@ -58,6 +58,22 @@ pub const BACKOFF_MAX_MS: u64 = 60_000;
 /// 802.11 reason code 3: "deauthenticated because sending station is leaving".
 const REASON_LEAVING: u16 = 3;
 
+/// The RSN Extension element a station sends after an SAE exchange run with
+/// Hash-to-Element: id 244, one octet, and in it bit 5, "SAE hash-to-element".
+/// The low nibble is the field length minus one, so zero.
+///
+/// caw only runs H2E, so every SAE association carries it. It is what lets the
+/// AP see that the method was not downgraded to hunting-and-pecking, and like
+/// the RSN element it has to be repeated verbatim in message 2.
+const RSNXE_SAE_H2E: [u8; 3] = [244, 1, 1 << 5];
+
+/// The 802.11 management header in front of a frame body: frame control,
+/// duration, three addresses and sequence control.
+const MGMT_HEADER_LEN: usize = 24;
+/// Frame control, first octet, of an Authentication frame: type management,
+/// subtype 11.
+const FC_AUTH: u8 = 0xb0;
+
 /// Where a connection is. Drives what `caw status` prints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -144,12 +160,13 @@ pub enum Action {
         ifindex: u32,
     },
     Associate(Box<AssocRequest>),
+    /// Send one 802.11 authentication frame with `NL80211_CMD_AUTHENTICATE`:
+    /// SAE's commit or confirm.
+    Authenticate(Box<AuthRequest>),
     Disconnect {
         /// An 802.11 reason code.
         reason: u16,
     },
-    /// A management frame body for `NL80211_CMD_FRAME`: SAE commit or confirm.
-    SendMgmtFrame(Vec<u8>),
     SendEapol(Vec<u8>),
     /// Install keys via `NL80211_CMD_NEW_KEY`. A group rekey leaves the
     /// pairwise key alone; see [`KeyInstall::pairwise`].
@@ -189,6 +206,19 @@ pub enum TimerId {
     ReconnectBackoff,
 }
 
+/// One authentication frame, for `NL80211_CMD_AUTHENTICATE`.
+pub struct AuthRequest {
+    pub ifindex: u32,
+    pub ssid: Vec<u8>,
+    pub bssid: [u8; 6],
+    pub freq_mhz: u32,
+    /// `NL80211_AUTHTYPE_*`.
+    pub auth_type: u32,
+    /// The frame body from the transaction sequence number on. The kernel
+    /// supplies the header and the Authentication Algorithm Number.
+    pub data: Vec<u8>,
+}
+
 /// Everything `NL80211_CMD_CONNECT` needs, decided here.
 ///
 /// Owned rather than borrowed like `caw_nl80211::Connect`, because it crosses
@@ -213,6 +243,12 @@ pub struct AssocRequest {
     pub ies: Vec<u8>,
     /// Present when the device runs the handshake itself.
     pub offload: Option<Offload>,
+    /// caw has already authenticated with this BSS itself, so the request is
+    /// `NL80211_CMD_ASSOCIATE` rather than `NL80211_CMD_CONNECT`. True after
+    /// SAE: the kernel's own SME behind `CONNECT` cannot run it on a mac80211
+    /// device, so the station runs the authentication frames and associates
+    /// separately.
+    pub authenticated: bool,
 }
 
 /// Keys to install, in the order they appear here.
@@ -710,6 +746,13 @@ impl Connection {
         };
 
         let pre_assoc = matches!(auth, Auth::PreAssoc(_));
+        // Authenticating with a second AP makes mac80211 deauthenticate from
+        // the first, so an SAE roam would drop a working link before the new
+        // one exists. Stay put until the link is lost and a fresh attempt
+        // chooses the better AP.
+        if roaming && pre_assoc {
+            return;
+        }
         self.session = Some(Session {
             choice,
             auth,
@@ -759,7 +802,13 @@ impl Connection {
     fn on_sae_step(&mut self, step: Result<Step, caw_crypto::Error>, out: &mut Vec<Action>) {
         match step {
             Ok(Step::Send(frame)) => {
-                out.push(Action::SendMgmtFrame(frame));
+                let Some(request) = self.auth_request(frame) else {
+                    return self.fail(
+                        Failure::Internal("SAE produced a frame with no body".into()),
+                        out,
+                    );
+                };
+                out.push(Action::Authenticate(Box::new(request)));
                 self.arm(TimerId::AuthTimeout, AUTH_TIMEOUT_MS, out);
             }
             Ok(Step::Wait) => {}
@@ -776,6 +825,41 @@ impl Connection {
             }
             Err(e) => self.fail(Failure::from_crypto(e), out),
         }
+    }
+
+    /// Address an SAE frame body to the BSS being authenticated with.
+    ///
+    /// The provider's frame starts with the Authentication Algorithm Number,
+    /// which `NL80211_ATTR_AUTH_DATA` leaves to the kernel.
+    fn auth_request(&self, frame: Vec<u8>) -> Option<AuthRequest> {
+        let target = self.target.as_ref()?;
+        let session = self.session.as_ref()?;
+        let data = frame.get(2..)?.to_vec();
+        Some(AuthRequest {
+            ifindex: self.device.ifindex,
+            ssid: target.ssid.clone(),
+            bssid: session.choice.bssid,
+            freq_mhz: session.choice.freq_mhz,
+            auth_type: caw_nl80211::NL80211_AUTHTYPE_SAE,
+            data,
+        })
+    }
+
+    /// An authentication frame from the kernel, if it is the AP we are
+    /// authenticating with answering. What comes back is the body, starting
+    /// at the Authentication Algorithm Number, which is what the provider
+    /// parses.
+    fn auth_body<'f>(&self, frame: &'f [u8]) -> Option<&'f [u8]> {
+        let bssid = self.session.as_ref()?.choice.bssid;
+        if frame.len() < MGMT_HEADER_LEN || frame[0] != FC_AUTH {
+            return None;
+        }
+        // Address 2 is the transmitter. Anything else answering is not the AP
+        // this exchange is with, and SAE drops it rather than failing on it.
+        if frame[10..16] != bssid {
+            return None;
+        }
+        Some(&frame[MGMT_HEADER_LEN..])
     }
 
     // -- association ------------------------------------------------------
@@ -804,6 +888,7 @@ impl Connection {
                     None
                 }
             },
+            authenticated: false,
         };
 
         if let Some(rsn) = &session.choice.rsn {
@@ -840,7 +925,16 @@ impl Connection {
             } else {
                 caw_nl80211::NL80211_MFP_NO
             });
+            // SAE run here rather than by the device: authenticated already,
+            // and with H2E, which the RSNXE declares.
+            let mut element = element;
+            if rsn.akm.is_sae() && request.offload.is_none() {
+                request.authenticated = true;
+                element.extend_from_slice(&RSNXE_SAE_H2E);
+            }
             request.ies = element.clone();
+            // Message 2 repeats the RSN element and the RSNXE together, as
+            // they went out in the association request.
             session.assoc_ie = element;
         }
 
@@ -1163,9 +1257,16 @@ impl Connection {
             }
             Event::ExternalAuth { .. } => {}
 
-            Event::Frame(frame) if self.state == State::Authenticating => {
-                self.drive_sae(SaeEvent::Frame(&frame), out);
+            Event::Authenticate(frame) if self.state == State::Authenticating => {
+                if let Some(body) = self.auth_body(&frame) {
+                    self.drive_sae(SaeEvent::Frame(body), out);
+                }
             }
+            Event::Authenticate(_) => {}
+            // The kernel stopped waiting for this frame's answer. The exchange
+            // has its own retransmission timer, which decides whether to send
+            // again or give up; a second clock here would double-count.
+            Event::AuthTimedOut => {}
             Event::Frame(_) => {}
         }
     }

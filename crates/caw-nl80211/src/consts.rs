@@ -30,6 +30,8 @@ pub const NL80211_CMD_GET_SCAN: u8 = 32;
 pub const NL80211_CMD_TRIGGER_SCAN: u8 = 33;
 pub const NL80211_CMD_NEW_SCAN_RESULTS: u8 = 34;
 pub const NL80211_CMD_SCAN_ABORTED: u8 = 35;
+pub const NL80211_CMD_AUTHENTICATE: u8 = 37;
+pub const NL80211_CMD_ASSOCIATE: u8 = 38;
 pub const NL80211_CMD_CONNECT: u8 = 46;
 pub const NL80211_CMD_DISCONNECT: u8 = 48;
 pub const NL80211_CMD_FRAME: u8 = 59;
@@ -69,6 +71,9 @@ pub const NL80211_ATTR_WPA_VERSIONS: u16 = 75;
 pub const NL80211_ATTR_AKM_SUITES: u16 = 76;
 pub const NL80211_ATTR_PS_STATE: u16 = 93;
 pub const NL80211_ATTR_KEY_DEFAULT_TYPES: u16 = 110;
+/// The authentication frame body from the transaction sequence number on;
+/// named `NL80211_ATTR_SAE_DATA` before it was generalised.
+pub const NL80211_ATTR_AUTH_DATA: u16 = 156;
 pub const NL80211_ATTR_SPLIT_WIPHY_DUMP: u16 = 174;
 pub const NL80211_ATTR_EXT_FEATURES: u16 = 217;
 pub const NL80211_ATTR_BSSID: u16 = 245;

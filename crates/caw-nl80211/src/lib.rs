@@ -1,8 +1,9 @@
 //! nl80211: wireless device control.
 //!
 //! Enumerates PHYs, triggers and collects scans, drives association, installs
-//! pairwise and group keys, and carries SAE's management frames via
-//! `NL80211_CMD_EXTERNAL_AUTH` / `NL80211_CMD_FRAME`.
+//! pairwise and group keys, and carries SAE's authentication frames via
+//! `NL80211_CMD_AUTHENTICATE` followed by `NL80211_CMD_ASSOCIATE` — the path a
+//! mac80211 device takes, since its in-kernel SME cannot run SAE.
 //!
 //! Note that on mac80211 softmac drivers the kernel does *not* perform the
 //! 4-way handshake; this crate associates and installs keys, but the handshake
@@ -32,7 +33,7 @@ pub use bss::{Bss, mbm_to_dbm};
 pub use consts::*;
 pub use event::{ConnectStatus, Event};
 pub use family::{Family, Groups};
-pub use msg::{Connect, KeyScope};
+pub use msg::{Authenticate, Connect, KeyScope};
 pub use sock::{Events, NL80211_FAMILY_NAME, Nl80211, resolve_genl_family};
 pub use wiphy::{ExtFeatures, IfType, Interface, Wiphy};
 

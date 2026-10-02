@@ -145,15 +145,9 @@ pub fn satisfies(akm: Akm, credential: Option<&Credential>) -> bool {
 /// rather than the PMK, a hierarchy `caw-crypto` does not derive, so
 /// negotiating one would produce a PTK that fails at the handshake MIC. An AP
 /// that offers FT alongside its plain suite is joined on the plain one. OWE is
-/// absent because its Diffie-Hellman has no provider yet. SAE is behind the
-/// `sae` feature: its state machine exists, but the daemon has no way to put
-/// its frames on the air, so choosing it would turn every transition-mode
-/// network into a failed connection instead of a WPA2 one.
+/// absent because its Diffie-Hellman has no provider yet.
 fn runnable(akm: Akm) -> bool {
-    if matches!(akm, Akm::Psk | Akm::PskSha256) {
-        return true;
-    }
-    if cfg!(feature = "sae") && akm == Akm::Sae {
+    if matches!(akm, Akm::Psk | Akm::PskSha256 | Akm::Sae) {
         return true;
     }
     // 802.1X needs a TLS stack, and the default build has none in the tree.
@@ -279,24 +273,11 @@ mod tests {
 
     /// The point of the AKM preference order: on an AP offering both, a
     /// passphrase profile joins with SAE.
-    #[cfg(feature = "sae")]
     #[test]
     fn transition_mode_picks_sae() {
         let rsn = rsn_of(&[Akm::Sae, Akm::Psk], false);
         assert_eq!(choose_akm(&rsn, Some(&passphrase())), Some(Akm::Sae));
         assert_eq!(negotiated_security(Akm::Sae, false), Security::Wpa3Personal);
-    }
-
-    /// Without a transport for SAE, a transition network is joined on its PSK
-    /// half and a WPA3-only one is not attempted at all.
-    #[cfg(not(feature = "sae"))]
-    #[test]
-    fn transition_mode_falls_back_to_psk_without_sae() {
-        let rsn = rsn_of(&[Akm::Sae, Akm::Psk], false);
-        assert_eq!(choose_akm(&rsn, Some(&passphrase())), Some(Akm::Psk));
-
-        let rsn = rsn_of(&[Akm::Sae], true);
-        assert_eq!(choose_akm(&rsn, Some(&passphrase())), None);
     }
 
     #[test]
